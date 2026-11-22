@@ -6,7 +6,9 @@ A small sprite-stacking renderer in plain WebGL2, with no libraries. Everything 
 slices, drawn as textured quads. The camera turns, tilts and zooms freely, in a parallel or a perspective
 view, and the cost stays near one fragment written per pixel.
 
-This engine was written with AI (Claude) as a free, public-domain reference for anyone to learn from or use.
+Designed and directed by @loktar00; the code was written by Claude (AI) under his direction.
+
+**[Live demo](https://loktar00.github.io/sprite-stack-engine/)**
 
 It exists to test two claims about sprite stacking with numbers instead of opinions:
 
@@ -219,4 +221,4 @@ frame over `n` frames.
 
 ## Licence
 
-Public domain (the Unlicense). See `LICENSE`. Copy it, change it, ship it; no credit is needed.
+MIT. See `LICENSE`. Use it, change it, ship it; keep the copyright notice (credit @loktar00).
