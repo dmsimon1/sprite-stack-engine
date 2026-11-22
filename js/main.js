@@ -362,7 +362,7 @@
     syncToolbarUI();
   }
 
-  function fit() { const d = window.devicePixelRatio || 1; canvas.width = Math.round(window.innerWidth * d); canvas.height = Math.round(window.innerHeight * d); autoScale = Math.max(1, Math.sqrt(canvas.width * canvas.height / 2.4e6)); }
+  function fit() { const d = window.devicePixelRatio || 1, r = canvas.getBoundingClientRect(); canvas.width = Math.max(1, Math.round((r.width || window.innerWidth) * d)); canvas.height = Math.max(1, Math.round((r.height || window.innerHeight) * d)); autoScale = Math.max(1, Math.sqrt(canvas.width * canvas.height / 2.4e6)); }
   function showHud(ms) {
     const s = E.stats, f1 = function (v) { return v === null || v === undefined ? '-' : v.toFixed(v < 10 ? 2 : 1); }, th = function (v) { return String(v).replace(/\B(?=(\d{3})+$)/g, ','); };
     const tod = env.t < 0.3 ? 'afternoon' : env.t < 0.82 ? 'golden hour' : 'dusk';
