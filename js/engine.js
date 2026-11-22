@@ -83,7 +83,7 @@
     vec3 n = t.gba * 2.0 - 1.0; n.xy = vec2(n.x * v_cs.x - n.y * v_cs.y, n.x * v_cs.y + n.y * v_cs.x);   // turn the facing with the slice
     o0 = vec4(t.r, n * 0.5 + 0.5);                          // palette index, facing
     float h = clamp(v_h / ${HMAX}.0, 0.0, 1.0) * 65535.0, hi = floor(h / 256.0);
-    o1 = vec4(hi / 255.0, (h - hi * 256.0) / 255.0, 0.0, 1.0);   // height, 16 bits
+    o1 = vec4(hi / 255.0, (h - hi * 256.0) / 255.0, 0.0, 0.0);   // height, 16 bits (the other two are voxel mode's)
   }`;
   const FS_COUNT = `#version 300 es
   precision highp float;
@@ -156,6 +156,7 @@
   precision highp float;
   ${WALK}
   flat in vec2 v_off;
+  uniform vec3 u_eye, u_fwd;
   layout(location=0) out vec4 o0; layout(location=1) out vec4 o1;
   void main() {
     vec4 t; vec3 q; if (!walk(t, q)) discard;
@@ -163,7 +164,12 @@
     float hw; gl_FragDepth = depthOf(q, v_off, hw);
     o0 = vec4(t.r, n * 0.5 + 0.5);
     float h = clamp(hw / ${HMAX}.0, 0.0, 1.0) * 65535.0, hi = floor(h / 256.0);
-    o1 = vec4(hi / 255.0, (h - hi * 256.0) / 255.0, 0.0, 1.0);
+    // Besides the height, how far in front of the camera the point is (16 bits over 4096 units). The light pass
+    // finds a pixel's place from its height, which fails for a ray that runs level (the row of the horizon); there
+    // it uses this distance instead.
+    vec2 l = (v_off + q.xy - v_rect.zw * 0.5) * v_base.w;
+    float far = clamp(dot(vec3(v_base.xy + vec2(l.x * v_how.x - l.y * v_how.y, l.x * v_how.y + l.y * v_how.x), hw) - u_eye, u_fwd) / 4096.0, 0.0, 1.0) * 65535.0, fi = floor(far / 256.0);
+    o1 = vec4(hi / 255.0, (h - hi * 256.0) / 255.0, fi / 255.0, (far - fi * 256.0) / 255.0);
   }`;
   const FS_COUNTVOXEL = `#version 300 es
   precision highp float;
@@ -244,7 +250,7 @@
   uniform vec4 u_world;       // the map's width and depth, the level of open ground, the time in seconds
   uniform vec4 u_fx;          // shadow softness (0: no shadows), occlusion strength, how far the lamps are lit, cloud shadows
   uniform vec4 u_view;        // the direction to the sun on screen (xy, pixels), where the haze starts, how deep it is
-  uniform vec4 u_tone;        // exposure, haze strength
+  uniform vec4 u_tone;        // exposure, haze strength, 1 for the perspective camera
   uniform float u_water;      // the palette index of water
   uniform vec4 u_lamp[${LAMPS}]; uniform vec3 u_lampCol[${LAMPS}];
   uniform vec4 u_blob[${BLOBS}]; uniform float u_blobLow[${BLOBS}]; uniform int u_nblob;
@@ -282,6 +288,10 @@
     float fall = b.z - a.z; bool level = fall > -0.0001;    // a ray that does not come down (voxel mode lets the camera look along the ground)
     if (outer && (level || (h - a.z) / fall > 1.0)) { o = vec4(finish(mix(u_hazeCol, u_hazeCol * 0.86 + u_skyCol * 0.3, clamp(normalize(b.xyz - a.xyz).z * 4.0, 0.0, 1.0))), 0.0); return; }      // sky
     vec3 p = mix(a.xyz, b.xyz, (h - a.z) / (abs(fall) < 0.0001 ? -0.0001 : fall));
+    // A ray that runs nearly level meets a height at no definite place. Voxel mode stores the distance in front of
+    // the camera for that case (perspective only: the parallel camera's rays all slope alike).
+    vec3 ray = normalize(b.xyz - a.xyz); vec4 g1 = texelFetch(u_g1, px, 0);
+    if (!outer && u_tone.z > 0.5 && abs(ray.z) < 0.06 && g1.b + g1.a > 0.0) p = u_eye + ray * ((g1.b * 65280.0 + g1.a * 255.0) / 65535.0 * 4096.0 / dot(ray, u_fwd));
     float t = u_world.w;
 
     // The edge of the map dissolves into haze: no hard border, and things driving off it fade out.
@@ -689,7 +699,7 @@
       // the sun's direction as it lies on the screen, two pixels long (for the rim)
       const sx = M.r[0] * sun[0] + M.r[1] * sun[1], sy = M.u[0] * sun[0] + M.u[1] * sun[1] + M.u[2] * sun[2], sl = Math.hypot(sx, sy) || 1;
       gl.uniform4f(u.u_view, sx / sl * 2, sy / sl * 2, M.back - 140, 760);
-      gl.uniform4f(u.u_tone, env.exposure, env.hazeK, 0, 0); gl.uniform1f(u.u_water, opt.water || -9);
+      gl.uniform4f(u.u_tone, env.exposure, env.hazeK, M.ortho ? 0 : 1, 0); gl.uniform1f(u.u_water, opt.water || -9);
       const lamps = new Float32Array(LAMPS * 4), lampCol = new Float32Array(LAMPS * 3), blobs = new Float32Array(BLOBS * 4), low = new Float32Array(BLOBS);
       opt.lamps.slice(0, LAMPS).forEach(function (l, i) { lamps.set(l.slice(0, 4), i * 4); lampCol.set(l.slice(4, 7), i * 3); });
       opt.blobs.slice(0, BLOBS).forEach(function (b, i) { blobs.set(b.slice(0, 4), i * 4); low[i] = b[4]; });
