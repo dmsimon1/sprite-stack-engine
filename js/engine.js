@@ -7,14 +7,18 @@
 //      - painter: lowest first, no depth test. Every slice is drawn in full (this is the overdraw).
 //      - hidden-surface removal: highest first with a depth test, so a pixel already covered rejects the rest.
 //   3. The light pass runs once per screen pixel: it looks up the colour, rebuilds the world position from the
-//      stored height, and works out sun, shadow (a march through a height map) and lamps.
-//   4. The result is copied to the canvas, scaled up without smoothing if the internal resolution is lower.
+//      stored height, and works out the light there: a low sun with soft shadows (a march through a height map),
+//      a fill from the sky above and the earth below, ambient occlusion, a rim on sunward edges, lamps, haze,
+//      a tone curve and a grade. Each has a comment where it is computed (FS_LIGHT).
+//   4. What glows (fire always, lamps and windows at dusk) is blurred at a quarter of the size and added back: bloom.
+//   5. The result is copied to the canvas, scaled up without smoothing if the internal resolution is lower.
 // An optional count pass draws the same instances additively to measure overdraw exactly.
 (function (global) {
   'use strict';
   const FL = 11;                      // floats per instance: pos 3, rot 1, rect 4, offset 2, scale 1
   const NB = 2048, ZQ = 16;           // height buckets, and buckets per unit of height
   const HMAX = 128;                   // tallest thing the G-buffer and the height map can hold
+  const LAMPS = 8, BLOBS = 24, STEPS = 48, REACH = 195;
 
   // ---------------------------------------------------------------- small matrix helpers (column-major 4x4)
   function mul(a, b) { const o = new Float32Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3]; return o; }
@@ -41,19 +45,19 @@
     const V = new Float32Array([r[0], u[0], -f[0], 0, r[1], u[1], -f[1], 0, r[2], u[2], -f[2], 0, -dot(r, eye), -dot(u, eye), dot(f, eye), 1]);
     let P;
     if (ortho) { const hh = cam.dist * th, hw = hh * aspect, n = 1, fr = 3200; P = new Float32Array([1 / hw, 0, 0, 0, 0, 1 / hh, 0, 0, 0, 0, -2 / (fr - n), 0, 0, 0, -(fr + n) / (fr - n), 1]); }
-    else { const n = Math.max(2, cam.dist * 0.05), fr = cam.dist * 3 + 900; P = new Float32Array([1 / (th * aspect), 0, 0, 0, 0, 1 / th, 0, 0, 0, 0, -(fr + n) / (fr - n), -1, 0, 0, -2 * fr * n / (fr - n), 0]); }
+    else { const n = Math.max(2, cam.dist * 0.05), fr = cam.dist * 3 + 1400; P = new Float32Array([1 / (th * aspect), 0, 0, 0, 0, 1 / th, 0, 0, 0, 0, -(fr + n) / (fr - n), -1, 0, 0, -2 * fr * n / (fr - n), 0]); }
     const vp = mul(P, V);
-    return { vp: vp, inv: invert(vp), eye: eye, f: f, ortho: ortho, th: th, cp: cp };
+    return { vp: vp, inv: invert(vp), eye: eye, f: f, r: r, u: u, ortho: ortho, th: th, cp: cp, px: P[0], py: P[5], back: back };
   }
 
   // ---------------------------------------------------------------- shaders
   const VS_SLICE = `#version 300 es
   layout(location=0) in vec3 a_pos; layout(location=1) in float a_rot; layout(location=2) in vec4 a_rect;
-  layout(location=3) in vec2 a_off; layout(location=4) in float a_scale;
+  layout(location=3) in vec2 a_off; layout(location=4) in float a_scale; layout(location=5) in vec2 a_corner;
   uniform mat4 u_vp; uniform float u_guard;                 // u_guard: half a pixel, in clip units (0 turns it off)
   out vec2 v_uv; flat out vec4 v_rect; flat out vec2 v_cs; out float v_h;
   void main() {
-    vec2 corner = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));
+    vec2 corner = a_corner;                                 // (0,0) (1,0) (0,1) (1,1): the same four for every instance
     float c = cos(a_rot), s = sin(a_rot);
     vec2 l = (a_off + (corner - 0.5) * a_rect.zw) * a_scale, m = a_off * a_scale;
     vec4 p = u_vp * vec4(a_pos + vec3(l.x * c - l.y * s, l.x * s + l.y * c, 0.0), 1.0);
@@ -88,44 +92,154 @@
     o = vec4(u_unit, 0.0, 0.0, 0.0);                          // every fragment written
   }`;
   const VS_FULL = `#version 300 es
+  layout(location=5) in vec2 a_corner;
   out vec2 v_uv;
-  void main() { vec2 p = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1)); v_uv = p; gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }`;
+  void main() { v_uv = a_corner; gl_Position = vec4(a_corner * 2.0 - 1.0, 0.0, 1.0); }`;
+
+  // The light pass. Everything here is worked out from three things per pixel (colour, facing, height) and one
+  // small texture of the whole map (u_hm: the height of the tallest solid thing over every ground cell).
   const FS_LIGHT = `#version 300 es
   precision highp float;
   uniform sampler2D u_g0, u_g1, u_pal, u_hm;
-  uniform mat4 u_inv; uniform vec3 u_sun; uniform vec2 u_world; uniform float u_night; uniform int u_shadows;
-  uniform vec4 u_lamp[8]; uniform int u_nlamp; uniform vec4 u_fig[8]; uniform int u_nfig;
+  uniform mat4 u_inv;
+  uniform vec3 u_sun, u_sunCol, u_skyCol, u_bounceCol, u_hazeCol, u_outer, u_eye, u_fwd;
+  uniform vec4 u_world;       // the map's width and depth, the level of open ground, the time in seconds
+  uniform vec4 u_fx;          // shadow softness (0: no shadows), occlusion strength, how far the lamps are lit, cloud shadows
+  uniform vec4 u_view;        // the direction to the sun on screen (xy, pixels), where the haze starts, how deep it is
+  uniform vec4 u_tone;        // exposure, haze strength
+  uniform float u_water;      // the palette index of water
+  uniform vec4 u_lamp[${LAMPS}]; uniform vec3 u_lampCol[${LAMPS}];
+  uniform vec4 u_blob[${BLOBS}]; uniform float u_blobLow[${BLOBS}]; uniform int u_nblob;
   in vec2 v_uv; out vec4 o;
-  float ground(vec2 p) { return p.x < 0.0 || p.y < 0.0 || p.x >= u_world.x || p.y >= u_world.y ? 0.0 : texelFetch(u_hm, ivec2(p), 0).r * 127.5; }
+
+  float land(vec2 p) { return textureLod(u_hm, p / u_world.xy, 0.0).r * 127.5; }            // smoothed between cells
+  float height(ivec2 px) { vec4 g = texelFetch(u_g1, clamp(px, ivec2(0), textureSize(u_g1, 0) - 1), 0); return (g.r * 65280.0 + g.g * 255.0) / 65535.0 * ${HMAX}.0; }
+  float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  float vnoise(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f); return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y); }
+  // The country beyond the map, which no stack covers: a patchwork of fields with hedges between them, made up
+  // on the spot from noise. It is flat and it is soon lost in the haze; it only has to stop the map from
+  // ending at a ruled edge.
+  vec3 beyond(vec2 p) {
+    vec2 w = (p + 40.0 * vec2(vnoise(p * 0.009), vnoise(p * 0.009 + 7.3))) / 118.0, c = floor(w), f = fract(w);
+    float k = hash(c), e = min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y)) * 118.0;
+    vec3 col = u_outer * (k < 0.45 ? vec3(1.0) : k < 0.68 ? vec3(1.28, 1.1, 0.8) : k < 0.84 ? vec3(1.06, 0.84, 0.7) : vec3(0.9, 0.97, 0.85));
+    return mix(u_outer * 0.7, col, smoothstep(1.0, 3.2, e)) * (0.9 + 0.2 * vnoise(p * 0.11));
+  }
+  // Tone curve and grade. The curve leaves dark and middle tones alone and rolls bright ones off towards white
+  // instead of clipping them. The grade adds a little saturation, warms the highlights and cools the shadows.
+  vec3 finish(vec3 c) {
+    c = 1.0 - exp(-pow(max(c * u_tone.x, 0.0), vec3(1.25)) * 1.7);
+    float l = dot(c, vec3(0.299, 0.587, 0.114));
+    c = mix(vec3(l), c, 1.16);
+    c += vec3(0.022, 0.006, -0.022) * smoothstep(0.4, 1.0, l) + vec3(-0.014, 0.0, 0.022) * (1.0 - smoothstep(0.0, 0.45, l));
+    return clamp(c, 0.0, 1.0);
+  }
   void main() {
     ivec2 px = ivec2(gl_FragCoord.xy);
     vec4 g0 = texelFetch(u_g0, px, 0);
-    vec3 sky = mix(vec3(0.62, 0.80, 0.93), vec3(0.05, 0.06, 0.12), u_night);
-    if (g0.r == 0.0) { o = vec4(sky, 1.0); return; }
-    vec4 g1 = texelFetch(u_g1, px, 0);
-    float h = (g1.r * 255.0 * 256.0 + g1.g * 255.0) / 65535.0 * ${HMAX}.0;
-    vec4 pal = texelFetch(u_pal, ivec2(int(g0.r * 255.0 + 0.5), 0), 0);
-    vec3 n = normalize(g0.gba * 2.0 - 1.0);
+    bool outer = g0.r == 0.0;                               // nothing was drawn here: open ground beyond the map
+    float h = outer ? u_world.z : height(px);
     // the world position: where this pixel's view ray meets the plane at the stored height
     vec2 ndc = v_uv * 2.0 - 1.0; vec4 a = u_inv * vec4(ndc, -1.0, 1.0), b = u_inv * vec4(ndc, 1.0, 1.0); a /= a.w; b /= b.w;
     vec3 p = mix(a.xyz, b.xyz, (h - a.z) / (b.z - a.z));
-    float lit = 1.0;
-    if (u_shadows == 1) {
-      vec3 q = p + n * 0.8 + vec3(0.0, 0.0, 0.5);           // step off the surface, then walk towards the sun
-      for (int i = 0; i < 48; i++) { q += u_sun * 1.6; if (q.z > 100.0) break; if (ground(q.xy) > q.z) { lit = 0.0; break; } }
-      for (int i = 0; i < u_nfig; i++) {                    // the walkers are not in the height map: each is a cylinder
-        vec4 f = u_fig[i]; vec2 d = f.xy - p.xy; float t = dot(d, u_sun.xy) / dot(u_sun.xy, u_sun.xy);
-        if (t > 0.5 && length(d - u_sun.xy * t) < f.w && p.z + u_sun.z * t < f.z) lit = min(lit, 0.2);
+    float t = u_world.w;
+
+    // The edge of the map dissolves into haze: no hard border, and things driving off it fade out.
+    vec2 over = max(-p.xy, p.xy - u_world.xy);
+    float fade = smoothstep(-24.0, 92.0, length(max(over, 0.0)) + min(max(over.x, over.y), 0.0) + (vnoise(p.xy * 0.012) - 0.5) * 30.0);
+    if (fade > 0.995) { o = vec4(finish(u_hazeCol), 0.0); return; }
+
+    vec4 pal = texelFetch(u_pal, ivec2(int(g0.r * 255.0 + 0.5), 0), 0);
+    vec3 alb = outer ? mix(beyond(p.xy), u_outer, smoothstep(0.1, 0.5, fade)) : pal.rgb;      // the made-up fields lose their detail first
+    vec3 n = outer ? vec3(0.0, 0.0, 1.0) : normalize(g0.gba * 2.0 - 1.0);
+    float glow = outer ? 0.0 : pal.a;
+    bool wet = !outer && abs(g0.r * 255.0 - u_water) < 1.5;
+    if (wet) {                                              // water: ripples that drift, one art pixel each
+      vec2 q = floor(p.xy);
+      n = normalize(vec3(vnoise(q * 0.45 + vec2(t * 0.7, t * 1.1)) - 0.5, vnoise(q * 0.8 - vec2(t * 0.9, t * 0.4)) - 0.5, 1.6));
+    }
+
+    // Soft shadows. Walk from the pixel towards the sun over the height map, in steps that grow (1.3 units at
+    // first, 4.6 at most), and keep the smallest clearance over the land, measured against the distance walked:
+    // a ray that only just clears a roof far away is in the penumbra, so shadows are sharp at the foot of a wall
+    // and soft at their tips. The walk ends after ${REACH} units; shadows fade out there instead of stopping dead.
+    float sh = 1.0;
+    if (u_fx.x > 0.0) {
+      vec3 q = p + vec3(n.xy * 3.5, 1.3);                   // start off the surface (and clear of the eaves)
+      // (every art pixel takes steps of a slightly different length, which turns the banding of a coarse walk into
+      // a fine dither that stays put on the ground)
+      float d = 0.0, ds = 1.3, jit = 0.78 + 0.44 * hash(floor(p.xy) + floor(p.z) * 7.31);
+      for (int i = 0; i < ${STEPS}; i++) {
+        d += ds * jit; ds = min(ds * 1.09, 4.6);
+        vec3 s = q + u_sun * d;
+        sh = min(sh, mix(clamp((s.z - land(s.xy)) / (u_fx.x * d), 0.0, 1.0), 1.0, smoothstep(${REACH}.0 * 0.7, ${REACH}.0, d)));
+        if (sh <= 0.0 || s.z > 125.0) break;
       }
+      sh = sh * sh * (3.0 - 2.0 * sh);
+      // Moving things are not in the height map. Each is an upright cylinder (soldiers, the jeep) or a blob in
+      // the air (smoke, birds): the ray to the sun is tested against its axis.
+      for (int i = 0; i < ${BLOBS}; i++) {
+        if (i >= u_nblob) break;
+        vec4 B = u_blob[i]; vec2 dd = B.xy - p.xy; float k = dot(dd, u_sun.xy) / dot(u_sun.xy, u_sun.xy);
+        if (k > 0.5) {
+          float z = p.z + u_sun.z * k, r = length(dd - u_sun.xy * k);
+          sh *= 1.0 - 0.72 * smoothstep(B.w * 1.2, B.w * 0.5, r) * smoothstep(u_blobLow[i] - 1.5, u_blobLow[i] + 0.5, z) * (1.0 - smoothstep(B.z - 0.5, B.z + 1.5, z));
+        }
+      }
+      // cloud shadows: two layers of slow noise sliding over the land
+      float cl = vnoise(p.xy * 0.0058 + t * vec2(0.045, 0.028)) * 0.65 + vnoise(p.xy * 0.017 - t * vec2(0.02, 0.05)) * 0.35;
+      sh *= 1.0 - u_fx.w * smoothstep(0.5, 0.78, cl);
     }
+
+    // Ambient occlusion from the height map: look round the pixel at two distances and see how much of the
+    // land there rises above it. A corner between ground and wall, or the ground under a hedge, gets less of
+    // the sky. Walls are sampled out in front of themselves, and darken a little towards their foot (contact).
+    float ao = 1.0;
+    if (u_fx.y > 0.0) {
+      vec2 c0 = p.xy + n.xy * 3.0; float occ = 0.0;
+      for (int i = 0; i < 8; i++) {
+        float an = float(i) * 0.7854 + 0.4; vec2 dir = vec2(cos(an), sin(an));
+        occ += clamp((land(c0 + dir * 2.5) - p.z - 1.0) / 2.5, 0.0, 1.0) * 0.55 + clamp((land(c0 + dir * 7.5) - p.z - 1.0) / 7.5, 0.0, 1.0) * 0.45;
+      }
+      ao = 1.0 - occ / 8.0;
+      if (n.z < 0.6) ao *= mix(0.68, 1.0, smoothstep(0.0, 7.0, p.z - land(p.xy + n.xy * 4.5)));
+      ao = mix(1.0, max(ao, 0.25), u_fx.y);
+    }
+
+    // The fill: instead of one flat ambient colour, cool light from the sky on what faces up and warm light
+    // bounced off the earth on what faces down, blended by the facing (hemisphere lighting).
+    vec3 fill = mix(u_bounceCol, u_skyCol, n.z * 0.5 + 0.5);
+    // Bounce: a wall in shade is still lit by the sunlit ground and walls across from it. A cheap stand-in for
+    // that: warm light arriving level, strongest on the side turned away from the sun.
+    fill += u_bounceCol * (1.0 - n.z * n.z) * (0.3 + 0.7 * max(0.0, -dot(n.xy, normalize(u_sun.xy))));
+    // The key: a warm sun.
     float nl = max(dot(n, u_sun), 0.0);
-    vec3 day = pal.rgb * (vec3(0.60, 0.64, 0.74) * (0.82 + 0.18 * n.z) + vec3(1.0, 0.94, 0.82) * nl * lit * 0.62);
-    vec3 night = pal.rgb * vec3(0.10, 0.12, 0.20) * (0.7 + 0.3 * n.z) + pal.rgb * pal.a * vec3(1.0, 0.9, 0.6) * 1.1;
-    for (int i = 0; i < u_nlamp; i++) {
-      vec3 d = u_lamp[i].xyz - p; float r = length(d);
-      night += pal.rgb * vec3(1.0, 0.82, 0.5) * max(dot(n, d / r), 0.15) * 1.6 / (1.0 + r * r * 0.004) * smoothstep(u_lamp[i].w, 0.0, r);
+    vec3 light = fill * ao + u_sunCol * nl * sh;
+    // Rim: where the next pixel towards the sun is much lower, this pixel is a sunward edge, and catches light.
+    if (!outer) {
+      float drop = h - height(px + ivec2(floor(u_view.xy + 0.5)));
+      light += u_sunCol * smoothstep(3.0, 9.0, drop) * 0.3 * (0.25 + 0.75 * sh);
     }
-    o = vec4(mix(day, night, u_night), 1.0);
+    vec3 col = alb * light;
+    if (wet) {                                              // water also mirrors the sky and glints
+      vec3 v = normalize(u_eye - p), hv = normalize(u_sun + v);
+      col = col * 0.75 + u_skyCol * 0.3 + u_sunCol * pow(max(dot(n, hv), 0.0), 120.0) * sh;
+    }
+    // Lamps: point lights that fall off to nothing at their reach.
+    for (int i = 0; i < ${LAMPS}; i++) {
+      vec4 L = u_lamp[i];
+      if (L.w > 0.0) { vec3 d3 = L.xyz - p; float r = length(d3), att = max(0.0, 1.0 - r / L.w); col += alb * u_lampCol[i] * att * att * (0.3 + 0.7 * max(dot(n, d3 / max(r, 0.001)), 0.0)); }
+    }
+    // Pixels that shine. A glow of 1 in the palette always shines (fire). A smaller glow is a lamp or a window:
+    // dull by day, and lit as dusk falls. The amount goes out in alpha, and the bloom pass spreads it.
+    float e = glow > 0.98 ? 1.0 : glow * u_fx.z;
+    if (glow > 0.0) { if (glow <= 0.98) col *= 0.45; col = mix(col, alb * 1.7, e); }
+
+    // Haze: things further into the picture take on the colour of the air.
+    float hz = clamp((dot(p - u_eye, u_fwd) - u_view.z) / u_view.w, 0.0, 1.0);
+    col = mix(col, u_hazeCol, hz * hz * u_tone.y * (1.0 - e));
+    col = mix(col, u_hazeCol, fade);
+    o = vec4(finish(col), e * (1.0 - fade));
   }`;
   const FS_HEAT = `#version 300 es
   precision highp float;
@@ -140,10 +254,38 @@
       : t < 0.78 ? mix(vec3(0.98, 0.90, 0.20), vec3(0.92, 0.15, 0.12), (t - 0.55) / 0.23) : mix(vec3(0.92, 0.15, 0.12), vec3(1.0), min(1.0, (t - 0.78) / 0.22));
     o = vec4(col, 1.0);
   }`;
-  const FS_BLIT = `#version 300 es
+  // Bloom, in three small shaders. Bright: keep only what glows (colour times the alpha the light pass wrote),
+  // shrunk to a quarter. Blur: nine taps along one axis, run across then down, twice. Post: add the blur back
+  // over the sharp picture ("screen", so it cannot go past white) and darken the corners a little (vignette).
+  const FS_BRIGHT = `#version 300 es
   precision highp float;
-  uniform sampler2D u_tex; in vec2 v_uv; out vec4 o;
-  void main() { o = texture(u_tex, v_uv); }`;
+  uniform sampler2D u_tex; uniform vec2 u_px; in vec2 v_uv; out vec4 o;
+  void main() {
+    vec4 a = texture(u_tex, v_uv + vec2(-1.0, -1.0) * u_px), b = texture(u_tex, v_uv + vec2(1.0, -1.0) * u_px), c = texture(u_tex, v_uv + vec2(-1.0, 1.0) * u_px), d = texture(u_tex, v_uv + vec2(1.0, 1.0) * u_px);
+    o = vec4((a.rgb * a.a + b.rgb * b.a + c.rgb * c.a + d.rgb * d.a) * 0.25, 1.0);
+  }`;
+  const FS_BLUR = `#version 300 es
+  precision highp float;
+  uniform sampler2D u_tex; uniform vec2 u_step; in vec2 v_uv; out vec4 o;
+  void main() {
+    vec3 c = texture(u_tex, v_uv).rgb * 0.227;
+    c += (texture(u_tex, v_uv + u_step).rgb + texture(u_tex, v_uv - u_step).rgb) * 0.1945;
+    c += (texture(u_tex, v_uv + u_step * 2.0).rgb + texture(u_tex, v_uv - u_step * 2.0).rgb) * 0.1216;
+    c += (texture(u_tex, v_uv + u_step * 3.0).rgb + texture(u_tex, v_uv - u_step * 3.0).rgb) * 0.0541;
+    c += (texture(u_tex, v_uv + u_step * 4.0).rgb + texture(u_tex, v_uv - u_step * 4.0).rgb) * 0.0162;
+    o = vec4(c, 1.0);
+  }`;
+  const FS_POST = `#version 300 es
+  precision highp float;
+  uniform sampler2D u_tex, u_bloom; uniform vec2 u_size; uniform vec2 u_k;      // u_k: bloom strength, vignette strength
+  in vec2 v_uv; out vec4 o;
+  void main() {
+    vec3 c = texelFetch(u_tex, ivec2(min(v_uv * u_size, u_size - 1.0)), 0).rgb;  // the nearest internal pixel: no smoothing
+    vec3 b = min(texture(u_bloom, v_uv).rgb * u_k.x, 1.0);
+    c = 1.0 - (1.0 - c) * (1.0 - b);
+    vec2 d = v_uv - 0.5; c *= 1.0 - u_k.y * dot(d, d) * 1.6;
+    o = vec4(c, 1.0);
+  }`;
 
   function create(canvas) {
     const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, preserveDrawingBuffer: true });
@@ -172,20 +314,23 @@
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       return t;
     }
-    const pG = program(VS_SLICE, FS_G), pCount = program(VS_SLICE, FS_COUNT), pLight = program(VS_FULL, FS_LIGHT), pHeat = program(VS_FULL, FS_HEAT), pBlit = program(VS_FULL, FS_BLIT);
+    const pG = program(VS_SLICE, FS_G), pCount = program(VS_SLICE, FS_COUNT), pLight = program(VS_FULL, FS_LIGHT), pHeat = program(VS_FULL, FS_HEAT);
+    const pBright = program(VS_FULL, FS_BRIGHT), pBlur = program(VS_FULL, FS_BLUR), pPost = program(VS_FULL, FS_POST);
 
-    // the instance buffer and its vertex array (the quad's four corners come from gl_VertexID)
+    // the four corners of a quad (one small buffer, shared), the instance buffer, and their vertex arrays
+    const corners = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, corners); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
     let cap = 1 << 16, inst = new Float32Array(cap * FL), tmp = new Float32Array(cap * FL), keys = new Uint16Array(cap);
     const counts = new Uint32Array(NB + 1);
     const vao = gl.createVertexArray(), buf = gl.createBuffer(); gl.bindVertexArray(vao); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     [[0, 3, 0], [1, 1, 3], [2, 4, 4], [3, 2, 8], [4, 1, 10]].forEach(function (a) { gl.enableVertexAttribArray(a[0]); gl.vertexAttribPointer(a[0], a[1], gl.FLOAT, false, FL * 4, a[2] * 4); gl.vertexAttribDivisor(a[0], 1); });
-    const vaoFull = gl.createVertexArray();
+    gl.bindBuffer(gl.ARRAY_BUFFER, corners); gl.enableVertexAttribArray(5); gl.vertexAttribPointer(5, 2, gl.FLOAT, false, 0, 0);
+    const vaoFull = gl.createVertexArray(); gl.bindVertexArray(vaoFull); gl.bindBuffer(gl.ARRAY_BUFFER, corners); gl.enableVertexAttribArray(5); gl.vertexAttribPointer(5, 2, gl.FLOAT, false, 0, 0);
 
     // render targets, made again when the internal resolution changes
-    let iw = 0, ih = 0, g0, g1, lit, countTex, depth, fboG, fboLit, fboCount;
+    let iw = 0, ih = 0, bw = 0, bh = 0, g0, g1, lit, countTex, depth, fboG, fboLit, fboCount, bloom = [], fboBloom = [];
     function targets(w, h) {
-      if (w === iw && h === ih) return; iw = w; ih = h;
-      g0 = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE); g1 = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE); lit = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE);
+      if (w === iw && h === ih) return; iw = w; ih = h; bw = Math.max(1, w >> 2); bh = Math.max(1, h >> 2);
+      g0 = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE); g1 = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE); lit = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, null, gl.LINEAR);
       countTex = floatOK ? texture(w, h, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT) : texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE);
       depth = gl.createRenderbuffer(); gl.bindRenderbuffer(gl.RENDERBUFFER, depth); gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
       fboG = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboG);
@@ -194,6 +339,7 @@
       fboLit = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboLit); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, lit, 0);
       fboCount = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboCount); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, countTex, 0);
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
+      for (let i = 0; i < 2; i++) { bloom[i] = texture(bw, bh, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, null, gl.LINEAR); fboBloom[i] = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboBloom[i]); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, bloom[i], 0); }
     }
 
     const E = { gl: gl, renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'unknown', stats: { instances: 0, slices: 0, cpuMs: 0, gpuMs: null, written: null, covered: null } };
@@ -202,18 +348,25 @@
 
     E.makeAtlas = function (data, size) { return texture(size, size, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, data); };
     E.setPalette = function (bytes) { palTex = texture(256, 1, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, bytes); };
-    // the height map for shadows: one byte per ground cell, the height of the tallest thing standing on it (in half units)
-    E.setHeightMap = function (bytes, w, h) { hmTex = texture(w, h, gl.R8, gl.RED, gl.UNSIGNED_BYTE, bytes); world = [w, h]; };
+    // the height map for shadows and occlusion: one byte per ground cell, the height of the tallest thing standing
+    // on it (in half units). It is read with smoothing, which is what rounds the shadows' edges.
+    E.setHeightMap = function (bytes, w, h) { hmTex = texture(w, h, gl.R8, gl.RED, gl.UNSIGNED_BYTE, bytes, gl.LINEAR); world = [w, h]; };
 
-    // Turn slices into sorted instances. list: [{ stack, x, y, z, rot, scale, only (one slice index, or -1 for all) }]
+    // Turn slices into sorted instances. list: [{ stack, x, y, z, rot, scale, only (one slice index, or -1 for all),
+    // shx, shy (optional: how far the stack leans per unit of height, for trees and wheat in the wind) }]
     function build(list, M, opt) {
-      const ppuOrtho = ih / (2 * opt.cam.dist * M.th);
+      const ppuOrtho = ih / (2 * opt.cam.dist * M.th), vp = M.vp;
       let n = 0, slices = 0;
       // A shell stack is hollow, so a shallow view ray must not slip between two copies of a slice and through the
       // shell: the copies have to be closer together than the shell is deep along that ray.
       const slope = Math.tan(Math.max(0.06, M.ortho ? opt.cam.pitch : opt.cam.pitch - opt.cam.fov * 0.35));
       for (let q = 0; q < list.length; q++) {
-        const it = list[q], st = it.stack, sc = it.scale;
+        const it = list[q], st = it.stack, sc = it.scale, one = it.only >= 0;
+        // Leave out what the camera cannot see: a sphere round the stack against the edges of the view.
+        const zc = one ? it.z : it.z + st.n * sc * 0.5, R = (one ? st.radius : Math.hypot(st.radius, st.n * 0.5)) * sc + 2;
+        const cw = vp[3] * it.x + vp[7] * it.y + vp[11] * zc + vp[15];
+        if (!M.ortho && cw < -R) continue;                     // behind the camera
+        if ((M.ortho || cw > R) && (Math.abs(vp[0] * it.x + vp[4] * it.y + vp[8] * zc + vp[12]) - R * M.px > cw || Math.abs(vp[1] * it.x + vp[5] * it.y + vp[9] * zc + vp[13]) - R * M.py > cw)) continue;
         // how many screen rows one layer of this stack is tall: that many copies of each slice
         let rows = 1;
         if (opt.fill) {
@@ -221,13 +374,14 @@
           else { const d = Math.max(4, (it.x - M.eye[0]) * M.f[0] + (it.y - M.eye[1]) * M.f[1] + (it.z - M.eye[2]) * M.f[2] - st.radius * sc); rows = ih / (2 * d * M.th) * Math.min(1, M.cp + 0.25) * sc * 1.15; }
         }
         const copies = st.flat ? 1 : Math.max(st.shell ? Math.ceil(1 / (st.shell * slope)) : 1, Math.min(48, Math.ceil(rows)));
-        const cs = Math.cos(it.rot), sn = Math.sin(it.rot), a = it.only < 0 ? 0 : it.only, b = it.only < 0 ? st.slices.length : it.only + 1;
-        if (n + (b - a) * copies > cap) { cap *= 2; const i2 = new Float32Array(cap * FL), t2 = new Float32Array(cap * FL), k2 = new Uint16Array(cap); t2.set(tmp); k2.set(keys); inst = i2; tmp = t2; keys = k2; }
+        const a = one ? it.only : 0, b = one ? it.only + 1 : st.slices.length, shx = it.shx || 0, shy = it.shy || 0;
+        // (a layer with no side, flat ground, needs no fill: it is drawn once, at the top of its layer)
+        if (n + (b - a) * copies > cap) { while (n + (b - a) * copies > cap) cap *= 2; const i2 = new Float32Array(cap * FL), t2 = new Float32Array(cap * FL), k2 = new Uint16Array(cap); t2.set(tmp); k2.set(keys); inst = i2; tmp = t2; keys = k2; }
         for (let s = a; s < b; s++) {
-          const sl = st.slices[s], z0 = it.z + (it.only < 0 ? sl.z * sc : 0); slices++;
-          for (let k = 0; k < copies; k++) {
-            const z = z0 + k / copies * sc, j = n * FL;
-            tmp[j] = it.x; tmp[j + 1] = it.y; tmp[j + 2] = z; tmp[j + 3] = it.rot;
+          const sl = st.slices[s], z0 = it.z + (one ? 0 : sl.z * sc), first = sl.sides || st.flat ? 0 : copies - 1; slices++;
+          for (let k = first; k < copies; k++) {
+            const z = z0 + k / copies * sc, j = n * FL, up = z - it.z;
+            tmp[j] = it.x + shx * up; tmp[j + 1] = it.y + shy * up; tmp[j + 2] = z; tmp[j + 3] = it.rot;
             tmp[j + 4] = sl.u; tmp[j + 5] = sl.v; tmp[j + 6] = sl.w; tmp[j + 7] = sl.h; tmp[j + 8] = sl.ox; tmp[j + 9] = sl.oy; tmp[j + 10] = sc;
             let key = Math.min(NB - 1, Math.max(0, Math.floor(z * ZQ))); if (opt.hsr) key = NB - 1 - key;      // painter: lowest first; hidden-surface removal: highest first
             keys[n++] = key;
@@ -248,10 +402,14 @@
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n);
       gl.disable(gl.DEPTH_TEST);
     }
+    function pass(fbo, w, h, prog, tex) { gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, w, h); gl.useProgram(prog.p); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(prog.u.u_tex, 0); }
 
-    // opt: { cam, list, hsr, fill, guard, shadows, night, heat (0 off, 1 written, 2 covered), measure, scale (canvas pixels per internal pixel), lamps, figures }
+    // opt: { cam, list, atlas, hsr, fill, guard, heat (0 off, 1 written, 2 covered), measure, scale (canvas pixels per
+    //        internal pixel), shadows, ao, bloom, water (palette index), time (seconds),
+    //        light { sun, sunCol, skyCol, bounceCol, hazeCol, hazeK, glow, exposure, outer, cloud },
+    //        lamps [[x, y, z, reach, r, g, b]], blobs [[x, y, top, radius, bottom]] }
     E.render = function (opt) {
-      const t0 = performance.now(), W = canvas.width, H = canvas.height;
+      const t0 = performance.now(), W = canvas.width, H = canvas.height, env = opt.light;
       targets(Math.max(1, Math.round(W / opt.scale)), Math.max(1, Math.round(H / opt.scale)));
       const M = cameraMatrices(opt.cam, iw / ih), n = build(opt.list, M, opt);
       if (timerExt && !query) { query = gl.createQuery(); gl.beginQuery(timerExt.TIME_ELAPSED_EXT, query); timing = true; }
@@ -278,19 +436,37 @@
       }
 
       // the light pass: once per pixel
+      const u = pLight.u, sun = env.sun;
       gl.bindFramebuffer(gl.FRAMEBUFFER, fboLit); gl.useProgram(pLight.p); gl.bindVertexArray(vaoFull);
-      [[g0, 'u_g0'], [g1, 'u_g1'], [palTex, 'u_pal'], [hmTex, 'u_hm']].forEach(function (t, i) { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t[0]); gl.uniform1i(pLight.u[t[1]], i); });
-      gl.uniformMatrix4fv(pLight.u.u_inv, false, M.inv); gl.uniform3fv(pLight.u.u_sun, opt.sun); gl.uniform2fv(pLight.u.u_world, world);
-      gl.uniform1f(pLight.u.u_night, opt.night ? 1 : 0); gl.uniform1i(pLight.u.u_shadows, opt.shadows ? 1 : 0);
-      const lamps = new Float32Array(32), figs = new Float32Array(32);
-      opt.lamps.slice(0, 8).forEach(function (l, i) { lamps.set([l[0], l[1], l[2], 90], i * 4); }); opt.figures.slice(0, 8).forEach(function (f, i) { figs.set(f, i * 4); });
-      gl.uniform4fv(pLight.u.u_lamp, lamps); gl.uniform1i(pLight.u.u_nlamp, Math.min(8, opt.lamps.length)); gl.uniform4fv(pLight.u.u_fig, figs); gl.uniform1i(pLight.u.u_nfig, Math.min(8, opt.figures.length));
+      [[g0, 'u_g0'], [g1, 'u_g1'], [palTex, 'u_pal'], [hmTex, 'u_hm']].forEach(function (t, i) { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t[0]); gl.uniform1i(u[t[1]], i); });
+      gl.uniformMatrix4fv(u.u_inv, false, M.inv); gl.uniform3fv(u.u_sun, sun); gl.uniform3fv(u.u_sunCol, env.sunCol); gl.uniform3fv(u.u_skyCol, env.skyCol); gl.uniform3fv(u.u_bounceCol, env.bounceCol);
+      gl.uniform3fv(u.u_hazeCol, env.hazeCol); gl.uniform3fv(u.u_outer, env.outer); gl.uniform3fv(u.u_eye, M.eye); gl.uniform3fv(u.u_fwd, M.f);
+      gl.uniform4f(u.u_world, world[0], world[1], opt.ground || 0, opt.time || 0);
+      // the shadow's softness follows the sun: its edge is wider on the ground when the light comes in low
+      gl.uniform4f(u.u_fx, opt.shadows ? 0.1 * sun[2] + 0.012 : 0, opt.ao ? 0.9 : 0, env.glow, opt.shadows ? env.cloud || 0 : 0);
+      // the sun's direction as it lies on the screen, two pixels long (for the rim)
+      const sx = M.r[0] * sun[0] + M.r[1] * sun[1], sy = M.u[0] * sun[0] + M.u[1] * sun[1] + M.u[2] * sun[2], sl = Math.hypot(sx, sy) || 1;
+      gl.uniform4f(u.u_view, sx / sl * 2, sy / sl * 2, M.back - 140, 760);
+      gl.uniform4f(u.u_tone, env.exposure, env.hazeK, 0, 0); gl.uniform1f(u.u_water, opt.water || -9);
+      const lamps = new Float32Array(LAMPS * 4), lampCol = new Float32Array(LAMPS * 3), blobs = new Float32Array(BLOBS * 4), low = new Float32Array(BLOBS);
+      opt.lamps.slice(0, LAMPS).forEach(function (l, i) { lamps.set(l.slice(0, 4), i * 4); lampCol.set(l.slice(4, 7), i * 3); });
+      opt.blobs.slice(0, BLOBS).forEach(function (b, i) { blobs.set(b.slice(0, 4), i * 4); low[i] = b[4]; });
+      gl.uniform4fv(u.u_lamp, lamps); gl.uniform3fv(u.u_lampCol, lampCol); gl.uniform4fv(u.u_blob, blobs); gl.uniform1fv(u.u_blobLow, low); gl.uniform1i(u.u_nblob, Math.min(BLOBS, opt.blobs.length));
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-      // to the canvas: the lit picture or the overdraw heat map, scaled up without smoothing
+      // bloom: what glows, shrunk to a quarter, blurred across and down, then again wider
+      if (opt.bloom && !opt.heat) {
+        pass(fboBloom[0], bw, bh, pBright, lit); gl.uniform2f(pBright.u.u_px, 1 / iw, 1 / ih); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        [[1.2, 0], [0, 1.2], [2.6, 0], [0, 2.6]].forEach(function (s, i) { pass(fboBloom[1 - (i & 1)], bw, bh, pBlur, bloom[i & 1]); gl.uniform2f(pBlur.u.u_step, s[0] / bw, s[1] / bh); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); });
+      }
+
+      // to the canvas: the lit picture with its bloom, or the overdraw heat map, scaled up without smoothing
       gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, W, H); gl.activeTexture(gl.TEXTURE0);
       if (opt.heat) { gl.useProgram(pHeat.p); gl.bindTexture(gl.TEXTURE_2D, countTex); gl.uniform1i(pHeat.u.u_count, 0); gl.uniform1i(pHeat.u.u_channel, opt.heat - 1); gl.uniform1f(pHeat.u.u_unit, UNIT); }
-      else { gl.useProgram(pBlit.p); gl.bindTexture(gl.TEXTURE_2D, lit); gl.uniform1i(pBlit.u.u_tex, 0); }
+      else {
+        gl.useProgram(pPost.p); gl.bindTexture(gl.TEXTURE_2D, lit); gl.uniform1i(pPost.u.u_tex, 0); gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, bloom[0]); gl.uniform1i(pPost.u.u_bloom, 1);
+        gl.uniform2f(pPost.u.u_size, iw, ih); gl.uniform2f(pPost.u.u_k, opt.bloom ? 0.55 + 0.75 * env.glow : 0, 0.22);
+      }
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
       // GPU time for the frame, when the browser offers a timer (many do not)
@@ -307,8 +483,9 @@
   }
 
   // What the characters' draw functions call: queues slices of a figure standing at world scale `scale`.
-  function figureWriter(list, scale) {
-    const put = function (st, i, x, y, z, rot) { list.push({ stack: st, x: x * scale, y: y * scale, z: z * scale, rot: rot, scale: scale, only: i }); };
+  // lift: the height of the ground the figure stands on.
+  function figureWriter(list, scale, lift) {
+    const put = function (st, i, x, y, z, rot) { list.push({ stack: st, x: x * scale, y: y * scale, z: z * scale + (lift || 0), rot: rot, scale: scale, only: i }); };
     return {
       slice: function (st, i, x, y, z, rot) { put(st, i, x, y, z, rot); },
       stack: function (st, x, y, z, rot) { for (let i = 0; i < st.slices.length; i++) put(st, i, x, y, z + st.slices[i].z, rot); },

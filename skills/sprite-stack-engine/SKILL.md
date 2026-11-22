@@ -19,9 +19,10 @@ The reference implementation is the repository this file ships in (`js/engine.js
 2. **A slice pass writes a G-buffer, not colour.** Per pixel: palette index, facing (a normal baked per slice
    pixel and rotated with the slice), and height.
 3. **A light pass runs once per screen pixel.** Colour comes from the palette; the world position is rebuilt
-   from the stored height (intersect the pixel's view ray with the plane at that height); sun, shadow and lamps
-   are computed there. Lighting cost no longer depends on overdraw.
-4. **Blit** to the canvas, without smoothing if the internal resolution is lower.
+   from the stored height (intersect the pixel's view ray with the plane at that height); sun, shadow, fill,
+   occlusion and lamps are computed there. Lighting cost no longer depends on overdraw.
+4. **Bloom** (optional): what glows, at a quarter of the size, blurred and added back.
+5. **Blit** to the canvas, without smoothing if the internal resolution is lower.
 
 ## Keeping stacks solid under a free camera
 
@@ -48,7 +49,10 @@ Measure first (see below). Then, in order of payoff:
    further than two pixels from empty space when building the atlas. This cuts written fragments several
    times over even in painter order, and costs nothing at run time.
 3. **Crop slices** to their filled rectangle and skip empty layers.
-4. **Internal resolution.** Rendering at half size quarters the pixels and also halves the copies needed per
+4. **Cull** stacks outside the view before building instances: a bounding sphere against the view's edges.
+5. **Ground with no sides.** If the ground is a stack (a height field in tiles), a layer none of whose pixels
+   lies on its outline has a top but no side. Draw it once, at the top of its layer, with no fill copies.
+6. **Internal resolution.** Rendering at half size quarters the pixels and also halves the copies needed per
    layer, so the fill drops by about eight.
 
 ## Measuring overdraw (never estimate it)
@@ -68,13 +72,30 @@ fragment shader for a rejected fragment depends on its early depth test. Report 
 
 ## Lighting and shadows
 
-- Bake a normal per slice pixel at build time: the average direction towards empty neighbours, with extra
-  weight upward for tops. Store it beside the palette index in the atlas.
-- Shadows: keep a height map of the static scene (tallest solid per ground cell). In the light pass march from
-  the pixel's world position towards the sun and test against it. Moving figures are not in the map; treat
-  each as a cylinder.
-- A height map has no overhangs: a lamp head or a balcony casts the shadow of a full pillar. Leave such parts
-  out of the map.
+Flat lighting (one ambient colour plus a sun) is what makes a stacked scene look like cardboard. All of the
+following run in the one light pass, from the G-buffer and a height map of the static scene (tallest solid per
+ground cell, one byte, read with linear filtering):
+
+- **Normals.** Bake one per slice pixel at build time: the sum of the directions towards empty space within two
+  pixels, nearer space counting more, with extra weight upward for tops. Two pixels rather than one rounds
+  corners and turns roof steps into a slope. Store it beside the palette index in the atlas. Let a stack tilt
+  its normals with a function (furrows, cobbles) and soften them towards "up" (grass, wheat, smoke).
+- **Key and fill.** A warm low sun. No flat ambient: blend a cool sky colour and a warm earth colour by the
+  normal's `z`, and add a level warm bounce on faces turned away from the sun.
+- **Ambient occlusion.** Sample the height map in eight directions at two radii round the pixel; land above the
+  pixel occludes. Offset the samples along the normal for walls, and darken walls towards their foot.
+- **Soft shadows.** March from the pixel towards the sun in growing steps and keep the smallest
+  `clearance / (softness * distance)`. Jitter the step length per art pixel to turn banding into dither. Cap the
+  march and fade the shadow out at the cap. Start a few pixels off the surface along the normal to clear eaves.
+- **Moving things** are not in the map: test the sun ray against a cylinder (figures, vehicles) or a blob with
+  a bottom and a top (smoke, birds).
+- **Rim.** If the pixel two screen pixels towards the sun is much lower, add sun colour.
+- **Haze, tone, grade.** Mix towards an air colour with depth; fade the map's edge into it; roll highlights off
+  with a curve rather than clipping; add a little saturation and a warm/cool split.
+- **Glow and bloom.** Keep a glow value per material. Write it to alpha, blur `colour * alpha` at quarter size,
+  add it back. Scale the glow of lamps and windows by the time of day; leave fire at full.
+- A height map has no overhangs: a lamp head, a pole's cross-arm or a balcony casts the shadow of a full
+  pillar. Leave such parts out of the map.
 
 ## When a mesh is the better tool
 
@@ -94,3 +115,8 @@ fragment shader for a rejected fragment depends on its early depth test. Report 
 | Count pass shows 255 everywhere | 8-bit count target | float target, or scale the unit |
 | Shell stacks show holes | shell thinner than one layer step on screen | keep at least two pixels of shell |
 | Pillar shadows under lamps | overhang in the height map | leave overhanging parts out |
+| Walls always in shadow | the shadow march starts under the eaves | start it further out along the normal |
+| Striped shadows far from the caster | march steps wider than the caster | cap the step, jitter it per art pixel |
+| Shadow holes under turned or scaled stacks | one height-map cell stamped per pixel | stamp the neighbouring cells too |
+| Grid lines on tiled ground | tile edges treated as surfaces | let the tile's function answer outside its box (padding) |
+| Black screen on Windows (ANGLE, D3D11) | `gl_VertexID` tricks, texture reads in vertex shaders | plain float attributes for the quad corners |
