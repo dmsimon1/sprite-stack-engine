@@ -38,6 +38,22 @@ The reference implementation is the repository this file ships in (`js/engine.js
   view ray points downward: keep `pitch > fov / 2` in perspective. Use a counting sort into height buckets;
   it is linear and runs every frame.
 
+## Voxel mode: below the tilt where flat slices hold
+
+Flat slices have a floor. Measure it instead of guessing: draw a view once with flat slices and once as
+solid boxes, read both height buffers back, and count the pixels where the flat picture shows something more
+than a layer lower. Here gaps lift off under 15 degrees with a parallel camera; a perspective camera fails
+where its highest ray stops pointing down (tilt under half the field of view), because height order is no
+longer depth order. Zooming in until a layer is taller than the fill's copy cap fails the same way.
+
+Below the limit, draw each slice as a box one layer tall (top, sides, bottom; cull back faces) and let the
+fragment shader walk the view ray through the slice's texels from where it enters the box to the first filled
+texel, writing that point's depth with the depth test on. Stacks are then solid from any angle. Say on
+screen when the mode is on (a badge), and give a key to force it, so nobody mistakes one mode for the other.
+
+Limbs made of single slices along a bone need fill too, and slices less than a layer apart, or they read as
+rows of discs from the front at any tilt.
+
 ## Keeping overdraw down
 
 Measure first (see below). Then, in order of payoff:

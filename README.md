@@ -13,8 +13,10 @@ Designed and directed by @loktar00; the code was written by Claude (AI) under hi
 It exists to test two claims about sprite stacking with numbers instead of opinions:
 
 - *"Slices break apart with a free camera."* They do if you draw one quad per slice. They do not if every
-  slice is drawn once per screen row its layer covers. Press **T** to see both.
-- *"Overdraw is around 99x at 1080p."* Drawn naively it is worse than that: this scene reaches **105 fragments
+  slice is drawn once per screen row its layer covers. Press **T** to see both. That holds down to a measured
+  tilt; below it the engine changes to [voxel mode](#voxel-mode), says so on screen, and stacks stay solid all
+  the way to the horizon.
+- *"Overdraw is around 99x at 1080p."* Drawn naively it is worse than that: this scene reaches **104 fragments
   per pixel** at street level. Drawn front to back with a depth test it is **1.09**. Press **O** for the heat
   map and **H** to switch.
 
@@ -29,6 +31,7 @@ Open `index.html` in a browser with WebGL2. It runs from the file system; there 
 | Drag | turn and tilt |
 | Shift-drag, right-drag | pan |
 | Wheel | zoom |
+| V | voxel mode: by itself (the default), always, never |
 | P | parallel / perspective camera |
 | H | hidden-surface removal / painter order |
 | O | overdraw heat map: fragments written, fragments covered, off |
@@ -54,22 +57,22 @@ blit, each frame waited for, averaged over 200 frames.
 
 | view | resolution | order | quads | written avg | written max | covered avg | covered max | ms/frame |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| overview | native 1920x1080 | painter, whole stacks | 23923 | 14.34 | 139 | 22.3 | 274 | 1.19 |
-| overview | native 1920x1080 | painter, shell stacks | 23622 | 8.83 | 115 | 21.0 | 272 | 1.17 |
-| overview | native 1920x1080 | hidden-surface, whole stacks | 23923 | 0.67 | 3 | 22.3 | 274 | 1.05 |
-| overview | native 1920x1080 | hidden-surface, shell stacks | 23622 | 0.67 | 3 | 21.0 | 272 | 1.00 |
-| overview | internal 960x540 | painter, whole stacks | 16093 | 10.24 | 94 | 15.6 | 165 | 0.77 |
-| overview | internal 960x540 | painter, shell stacks | 15792 | 6.15 | 70 | 14.3 | 163 | 0.70 |
-| overview | internal 960x540 | hidden-surface, whole stacks | 16093 | 0.67 | 2 | 15.6 | 165 | 0.89 |
-| overview | internal 960x540 | hidden-surface, shell stacks | 15792 | 0.67 | 2 | 14.3 | 163 | 0.68 |
-| street | native 1920x1080 | painter, whole stacks | 65903 | 104.90 | 490 | 143.5 | 801 | 3.15 |
-| street | native 1920x1080 | painter, shell stacks | 65695 | 51.30 | 486 | 140.2 | 799 | 2.52 |
-| street | native 1920x1080 | hidden-surface, whole stacks | 65903 | 1.09 | 3 | 143.5 | 801 | 1.89 |
-| street | native 1920x1080 | hidden-surface, shell stacks | 65695 | 1.09 | 3 | 140.2 | 799 | 2.02 |
-| street | internal 960x540 | painter, whole stacks | 45156 | 54.89 | 276 | 75.3 | 446 | 1.42 |
-| street | internal 960x540 | painter, shell stacks | 44948 | 26.94 | 275 | 72.8 | 444 | 1.35 |
-| street | internal 960x540 | hidden-surface, whole stacks | 45156 | 0.98 | 3 | 75.3 | 446 | 1.35 |
-| street | internal 960x540 | hidden-surface, shell stacks | 44948 | 0.98 | 3 | 72.8 | 444 | 1.50 |
+| overview | native 1920x1080 | painter, whole stacks | 24875 | 14.35 | 139 | 22.3 | 274 | 1.35 |
+| overview | native 1920x1080 | painter, shell stacks | 24574 | 8.84 | 115 | 21.0 | 272 | 1.30 |
+| overview | native 1920x1080 | hidden-surface, whole stacks | 24875 | 0.67 | 2 | 22.3 | 274 | 1.20 |
+| overview | native 1920x1080 | hidden-surface, shell stacks | 24574 | 0.67 | 2 | 21.0 | 272 | 1.20 |
+| overview | internal 960x540 | painter, whole stacks | 16365 | 10.24 | 94 | 15.6 | 165 | 0.80 |
+| overview | internal 960x540 | painter, shell stacks | 16064 | 6.15 | 70 | 14.3 | 163 | 0.87 |
+| overview | internal 960x540 | hidden-surface, whole stacks | 16365 | 0.67 | 2 | 15.6 | 165 | 0.76 |
+| overview | internal 960x540 | hidden-surface, shell stacks | 16064 | 0.67 | 2 | 14.3 | 163 | 0.89 |
+| street | native 1920x1080 | painter, whole stacks | 59981 | 104.33 | 490 | 141.2 | 670 | 3.11 |
+| street | native 1920x1080 | painter, shell stacks | 59773 | 50.78 | 474 | 137.9 | 668 | 2.84 |
+| street | native 1920x1080 | hidden-surface, whole stacks | 59981 | 1.09 | 3 | 141.2 | 670 | 2.33 |
+| street | native 1920x1080 | hidden-surface, shell stacks | 59773 | 1.09 | 3 | 137.9 | 668 | 2.24 |
+| street | internal 960x540 | painter, whole stacks | 33442 | 54.48 | 256 | 73.6 | 339 | 1.37 |
+| street | internal 960x540 | painter, shell stacks | 33234 | 26.58 | 241 | 71.2 | 337 | 1.25 |
+| street | internal 960x540 | hidden-surface, whole stacks | 33442 | 0.98 | 3 | 73.6 | 339 | 1.61 |
+| street | internal 960x540 | hidden-surface, shell stacks | 33234 | 0.98 | 3 | 71.2 | 337 | 1.17 |
 
 - **written**: fragments that reached the G-buffer, per screen pixel (all pixels; in the overview a third of
   the screen is open ground beyond the map, which no stack covers, so its best case is 0.67 and not 1).
@@ -78,25 +81,26 @@ blit, each frame waited for, averaged over 200 frames.
 
 What the numbers say, and what they do not:
 
-- The naive figure is real. Painter order at street level writes 105 fragments per pixel on average and 490 at
+- The naive figure is real. Painter order at street level writes 104 fragments per pixel on average and 490 at
   the worst pixel.
-- Hidden-surface removal takes written fragments from 105 to 1.09 (a factor of 96). The scene looks the same.
-- It does **not** reduce what the rasteriser covers: 143 fragments per pixel still reach the depth test. A
+- Hidden-surface removal takes written fragments from 104 to 1.09 (a factor of 96). The scene looks the same.
+- It does **not** reduce what the rasteriser covers: 141 fragments per pixel still reach the depth test. A
   rejected fragment is cheap but not free, and whether the GPU runs the fragment shader for it depends on its
   early depth test. That is why this table reports "written" and "covered" and never "shaded".
 - Shell stacks cut written fragments 1.6 to 2.0 times in painter order and change nothing once the depth test
   is on. (Much of this scene is trees and hedges, which are mostly surface to begin with.)
-- Half resolution roughly halves the fragments per pixel at street level (105 to 55) as well as quartering the
+- Half resolution roughly halves the fragments per pixel at street level (104 to 54) as well as quartering the
   pixels, because each layer needs half as many copies.
 - On this GPU every row is far under a 60 Hz frame (16.7 ms), so these timings mostly show that the scene is
   small for the hardware. The fragment counts are the hardware-independent part. Run `tools/bench.py` on your
   own machine; `--software` uses a CPU rasteriser, where fill cost is not hidden.
-- A good part of each frame is not fill at all. Building and sorting 24,000 to 66,000 instances in JavaScript
+- A good part of each frame is not fill at all. Building and sorting 16,000 to 60,000 instances in JavaScript
   takes 0.3 to 1.5 ms, and the light pass costs the same whatever the draw order: every pixel walks up to 48
   shadow steps and takes 16 occlusion samples. That is why the overview rows sit within 0.2 ms of one another.
 - These numbers are higher than the ones this page first reported (0.46 ms for the overview and 0.83 ms at
   street level, with hidden-surface removal and shell stacks). That was a town block of 1,476 slices under
-  one flat light; this is a map of 8,300 slices with the light pass described below.
+  one flat light; this is a map of 8,600 slices with the light pass described below. The machine is shared,
+  and timings move by a few tenths of a millisecond from run to run.
 
 ### Without a GPU
 
@@ -106,38 +110,127 @@ rough: only 6 frames per row.
 
 | view | resolution | order | written avg | ms/frame |
 | --- | --- | --- | ---: | ---: |
-| overview | native 1920x1080 | painter, whole stacks | 14.34 | 657 |
-| overview | native 1920x1080 | painter, shell stacks | 8.83 | 637 |
-| overview | native 1920x1080 | hidden-surface, whole stacks | 0.67 | 633 |
-| overview | native 1920x1080 | hidden-surface, shell stacks | 0.67 | 620 |
-| overview | internal 960x540 | painter, whole stacks | 10.24 | 263 |
-| overview | internal 960x540 | painter, shell stacks | 6.15 | 250 |
-| overview | internal 960x540 | hidden-surface, whole stacks | 0.67 | 255 |
-| overview | internal 960x540 | hidden-surface, shell stacks | 0.67 | 253 |
-| street | native 1920x1080 | painter, whole stacks | 104.89 | 1472 |
-| street | native 1920x1080 | painter, shell stacks | 51.30 | 1425 |
-| street | native 1920x1080 | hidden-surface, whole stacks | 1.09 | 1331 |
-| street | native 1920x1080 | hidden-surface, shell stacks | 1.09 | 1339 |
-| street | internal 960x540 | painter, whole stacks | 54.88 | 1349 |
-| street | internal 960x540 | painter, shell stacks | 26.94 | 547 |
-| street | internal 960x540 | hidden-surface, whole stacks | 0.98 | 517 |
-| street | internal 960x540 | hidden-surface, shell stacks | 0.98 | 476 |
+| overview | native 1920x1080 | painter, whole stacks | 14.35 | 721 |
+| overview | native 1920x1080 | painter, shell stacks | 8.84 | 720 |
+| overview | native 1920x1080 | hidden-surface, whole stacks | 0.67 | 733 |
+| overview | native 1920x1080 | hidden-surface, shell stacks | 0.67 | 700 |
+| overview | internal 960x540 | painter, whole stacks | 10.24 | 309 |
+| overview | internal 960x540 | painter, shell stacks | 6.15 | 303 |
+| overview | internal 960x540 | hidden-surface, whole stacks | 0.67 | 311 |
+| overview | internal 960x540 | hidden-surface, shell stacks | 0.67 | 300 |
+| street | native 1920x1080 | painter, whole stacks | 104.32 | 1872 |
+| street | native 1920x1080 | painter, shell stacks | 50.77 | 1600 |
+| street | native 1920x1080 | hidden-surface, whole stacks | 1.09 | 1468 |
+| street | native 1920x1080 | hidden-surface, shell stacks | 1.09 | 1462 |
+| street | internal 960x540 | painter, whole stacks | 54.47 | 489 |
+| street | internal 960x540 | painter, shell stacks | 26.57 | 493 |
+| street | internal 960x540 | hidden-surface, whole stacks | 0.98 | 797 |
+| street | internal 960x540 | hidden-surface, shell stacks | 0.98 | 503 |
 
-- On a CPU the light pass is now the main cost. The overview takes about 630 ms whatever the draw order,
+- On a CPU the light pass is now the main cost. The overview takes about 720 ms whatever the draw order,
   because the two million pixels each do the same shadow walk and occlusion samples; a quarter of the pixels
-  takes it to about 250 ms. **S** and **A** switch shadows and occlusion off.
-- At street level hidden-surface removal saves about a tenth at native resolution (1472 to 1331 ms). The
+  takes it to about 305 ms. **S** and **A** switch shadows and occlusion off.
+- At street level hidden-surface removal saves about a fifth at native resolution (1872 to 1468 ms). The
   rasteriser still walks every covered fragment, and covered fragments are what a CPU pays for.
 - None of these rows is real time: a software rasteriser at 1080p is the wrong tool whatever the method.
-- The machine was busy with other work during this run. One row (street, 960x540, painter, whole stacks, 1349
-  ms) is out of line with its three neighbours for that reason, so read these timings as orders of magnitude.
+- The machine was busy with other work during this run. One row (street, 960x540, hidden-surface, whole
+  stacks, 797 ms) is out of line with its three neighbours for that reason, so read these timings as orders
+  of magnitude.
 
 The two heat maps below are the street view at 1920x1080. (The frame times printed in these stills include the
 count pass and its read-back, so they are not the timings in the table.)
 
-![Fragments written, painter order: 105 per pixel on average](media/heat-painter.png)
+![Fragments written, painter order: 104 per pixel on average](media/heat-painter.png)
 
 ![Fragments written, hidden-surface removal: 1.09 per pixel on average](media/heat-hsr.png)
+
+## Voxel mode
+
+Sprite stacking has a floor. A slice is a flat picture of one layer; seen from above it reads as a solid
+because the layers overlap on screen. As the camera comes down towards the horizon each slice shrinks to a
+line, the layers stop overlapping, and no amount of row fill puts back what is not there. This engine does not
+pretend otherwise. Above a measured tilt it is pure sprite stacking: flat slices, nothing else. Below it, it
+changes to **voxel mode**, shows a badge that says so, and stacks stay solid from any angle, level with the
+ground included.
+
+![Nearly along the ground (tilt 8 degrees), flat slices: layers smear and sort wrongly](media/voxel-off.png)
+
+![The same view in voxel mode: the badge is top right](media/voxel-on.png)
+
+**What it is.** Each slice is drawn as what it stands for: a box one layer tall, with a top, four sides and a
+bottom. The box is drawn once. Its fragment shader starts where the view ray enters the box and steps from
+texel to texel of the slice until it meets a filled one, so every filled pixel of the slice becomes a small
+column with its own side faces, or leaves the box. The point it finds writes its own depth, and the depth test
+is always on, so boxes hide one another correctly whatever the camera does. The same slices, the same atlas,
+the same light pass; only the slice pass changes (`VS_VOXEL` and `WALK` in `js/engine.js`, under a comment
+block that says all this again).
+
+**When it switches on.** By itself, in two cases (`needVoxel` in `js/main.js`):
+
+- **The tilt is under the limit.** With the parallel camera that is 15 degrees. With the perspective camera
+  it is 24 degrees: half the field of view (20) is where the highest ray on screen stops pointing down, which
+  is also where height order stops being depth order, plus 4 to spare. Without voxel mode the camera is simply
+  not allowed lower; with it the perspective camera goes down to 2 degrees.
+- **A layer is taller on screen than the fill will cover.** Row fill draws at most 48 copies of a slice. Zoom
+  in until one layer of something in view is more than 48 pixels tall and gaps open between the copies.
+
+The limits are measured, not chosen by eye. `demo.holes()` draws a view both ways and counts the pixels where
+flat slices show something more than a layer lower than voxel mode does, a gap seen through, as a share of
+the pixels that show an object (`tools/bench.py --voxel`):
+
+| tilt | parallel camera (village) | perspective camera (street) |
+| ---: | ---: | ---: |
+| 60 | 0.38% | 0.14% |
+| 45 | 0.35% | 0.09% |
+| 30 | 0.33% | 0.11% |
+| 27 | 0.36% | 0.14% |
+| 24 | 0.39% | 0.24% |
+| 21 | 0.41% | 0.47% |
+| 18 | 0.38% | 1.19% |
+| 15 | 0.47% | 0.82% |
+| 12 | 0.63% | 0.49% |
+| 9 | 0.93% | 0.55% |
+| 6 | 1.98% | 0.51% |
+| 3 | 4.47% | 0.17% |
+
+Down to 18 degrees the parallel camera sits on a floor of about 0.35 percent (things one pixel wide, where a
+flat copy and a box cover different pixels). It lifts off at 15 and doubles by 9. The perspective camera
+doubles between 27 and 21, on the way to the 20 degrees where its top rays turn level. Below that its count
+is no longer a fair measure: slices then sort in the wrong order as well, which this count does not see, and
+the picture is far worse than half a percent suggests (the first still above).
+
+**The soldiers' limbs.** One part of this was a plain bug, found by looking at a soldier head-on. Arms and legs
+are single slices strung along a bone. The engine treated every one-layer stack as flat and gave it no fill at
+all, and the limb code spaced the slices up to 1.4 layers apart, so from the front a limb was a row of
+separate discs at any tilt. Limb slices now get fill like everything else and are placed less than a layer
+apart, and a soldier is solid head-on in plain sprite stacking.
+
+![A soldier head-on, flat slices (voxel mode held off with V: this close, a nearby layer is over 48 rows tall and the engine would otherwise switch)](media/soldier-normal.png)
+
+![The same in voxel mode](media/soldier-voxel.png)
+
+**The badge.** "VOXEL MODE, slices get side faces", top right, whenever it is on; it fades when the camera
+tilts back up. The read-out says why it is on. **V** forces it on, forces it off, or hands the choice back.
+Forced off, the camera gets its old limits back.
+
+**What it costs.**
+
+| view | drawn as | quads or boxes | written avg | covered avg | gaps | ms/frame |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| overview, tilt 41 | flat slices | 24574 | 0.67 | 21.0 | 0.70% | 1.18 |
+| overview, tilt 41 | voxel mode | 8615 | 0.67 | 7.7 | 0 | 0.90 |
+| street, tilt 25 | flat slices | 59773 | 1.09 | 137.9 | 0.19% | 2.12 |
+| street, tilt 25 | voxel mode | 5519 | 0.99 | 9.2 | 0 | 0.84 |
+| level, tilt 8 | flat slices | 81368 | 5.10 | 167.0 | 0.62% | 2.75 |
+| level, tilt 8 | voxel mode | 5605 | 1.52 | 7.2 | 0 | 0.81 |
+
+("Gaps" is the count above. Flat slices at 8 degrees are there only for the comparison: the camera
+does not go there without voxel mode.) On this GPU voxel mode is the cheaper of the two wherever both work:
+one box of twelve triangles per slice instead of up to 48 quads, so a tenth of the instances to build and
+sort and a fraction of the fragments to rasterise. What it gives up is the early depth test, because its
+shader writes depth, and it runs a short loop per fragment (at most 48 steps), so on hardware where fragment
+work is the limit the balance may differ; that is not measured here. It stays off above the limits anyway,
+because the point of this page is what flat slices can and cannot do, and where exactly they stop.
 
 ## The techniques
 
@@ -229,8 +322,9 @@ ground cell. Everything below comes from those.
 
 ## Where a mesh is still the better tool
 
-- **Views from below or along the horizon.** Height order is only depth order while every ray points downward,
-  and the perspective camera here is clamped for that reason. A first-person view needs a different renderer.
+- **Views from below or along the horizon.** Flat slices cannot do them: height order is only depth order
+  while every ray points downward. Voxel mode takes over there (it is, in effect, a small voxel renderer fed
+  with the same slices), and at that point a mesh would do the same job with far fewer boxes.
 - **Smooth or sloped surfaces close up.** A stack is stair-stepped at one layer per step. Roofs here show it.
 - **Rasteriser load.** Hidden-surface removal fixes fragments written, not fragments covered. A mesh draws
   only surfaces; a stack draws every layer's rectangle. Where raster throughput is the limit (very high
@@ -253,7 +347,7 @@ of poplars. A tank and a sandbag post watch the bridge; there are a half-track, 
 jerrycans, barbed wire, telegraph poles, craters, and a burnt-out lorry that is still burning. The vehicles
 are generic shapes and carry no markings.
 
-What moves: eight soldiers on four patrol routes, the tank's turret, a jeep that runs the road with dust
+What moves: eight soldiers on four patrol routes (**?follow=3&face=0** in the address keeps one in view, from the front), the tank's turret, a jeep that runs the road with dust
 behind it, flames and smoke, two flocks of birds, trees, grass and wheat in the wind, cloud shadows, the
 stream.
 
@@ -264,8 +358,8 @@ tall, so the stream lies under the fields, craters are dug into it, and hedges a
 it. The soldiers and their walk are built on the rig from
 [sprite-stack-animation](https://github.com/loktar00/sprite-stack-animation) (`js/rig.js`, `js/characters.js`).
 
-About 800 placed stacks (270 different ones, the ground tiles and wheat patches among them); 8,300 slices
-on screen in the overview; 16,000 to 66,000 quads a frame depending on camera and resolution. The page builds
+About 800 placed stacks (270 different ones, the ground tiles and wheat patches among them); 8,600 slices
+on screen in the overview; 16,000 to 60,000 quads a frame depending on camera and resolution. The page builds
 all of it, twice (whole and shell), in about a second.
 
 ## Files
@@ -273,13 +367,13 @@ all of it, twice (whole and shell), in about a second.
 | Path | What |
 | --- | --- |
 | `index.html` | the demo page |
-| `js/engine.js` | the renderer: instances, slice pass, count pass, light pass, bloom |
+| `js/engine.js` | the renderer: instances, slice pass (flat slices or voxel mode), count pass, light pass, bloom |
 | `js/art.js` | stacks from functions: voxels, normals, shell, atlas |
 | `js/models.js` | the objects: buildings, trees, vehicles, field works, smoke |
 | `js/scene.js` | the land, the layout, the routes, the palette, the light by time of day |
 | `js/characters.js`, `js/rig.js` | the soldier and his walk |
 | `js/main.js` | what moves, camera, input, read-out, capture hooks |
-| `tools/bench.py` | the table above |
+| `tools/bench.py` | the tables above (`--voxel` for voxel mode and the tilt sweep) |
 | `tools/capture.py`, `tools/encode.sh` | frames, MP4 and GIF of the camera tour |
 | `skills/sprite-stack-engine/SKILL.md` | the techniques written up as an agent skill |
 
@@ -290,11 +384,12 @@ Needs Python with Playwright (`pip install playwright`, `playwright install chro
 ```sh
 python tools/bench.py                 # GPU
 python tools/bench.py --software      # CPU rasteriser
+python tools/bench.py --voxel         # voxel mode: its cost, and where flat slices open gaps
 sh tools/encode.sh                    # out/tour.mp4 and out/tour.gif (needs ffmpeg)
 ```
 
-In the page, `demo.measure()` returns the counts for the current view and `demo.bench(n)` the milliseconds per
-frame over `n` frames.
+In the page, `demo.measure()` returns the counts for the current view, `demo.bench(n)` the milliseconds per
+frame over `n` frames, and `demo.holes()` the share of pixels where flat slices show a gap.
 
 ## Licence
 

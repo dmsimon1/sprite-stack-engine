@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """bench.py: measure the demo and print a table. Also saves a still of each configuration.
 
-    python tools/bench.py [--out out/bench] [--frames 120] [--software]
+    python tools/bench.py [--out out/bench] [--frames 120] [--software] [--voxel]
 
 Needs Playwright (pip install playwright; playwright install chromium). The page runs at 1920x1080 in headless
 Chromium. For each configuration it asks the page for:
   - fragments per pixel, counted exactly by the additive count pass (demo.measure)
   - milliseconds per frame over N frames, each one waited for (demo.bench)
 --software forces the CPU rasteriser (SwiftShader), where fill cost is not hidden by a fast GPU.
+--voxel measures voxel mode instead: what it costs beside flat slices where both hold (street), and what each
+shows where flat slices do not (level: nearly along the ground), then how many gaps flat slices open, tilt by tilt.
 """
 import argparse, asyncio, json, os, pathlib
 from playwright.async_api import async_playwright
@@ -22,6 +24,7 @@ async def main():
     ap.add_argument('--out', default='out/bench')
     ap.add_argument('--frames', type=int, default=120)
     ap.add_argument('--software', action='store_true')
+    ap.add_argument('--voxel', action='store_true')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     url = (pathlib.Path(__file__).resolve().parent.parent / 'index.html').as_uri() + '?hold'
@@ -39,10 +42,33 @@ async def main():
         except Exception:
             print('the page did not start; errors:', errors[:5])
             raise SystemExit(1)
+        if a.voxel:
+            print('renderer:', await page.evaluate('demo.engine.renderer'))
+            print('| view | drawn as | quads or boxes | written avg | covered avg | gaps | ms/frame |')
+            print('| --- | --- | ---: | ---: | ---: | ---: | ---: |')
+            for view, name in [('overview', 'overview, tilt 41'), ('street', 'street, tilt 25'), ('level', 'level, tilt 8')]:
+                for vox, how in [(0, 'flat slices'), (1, 'voxel mode')]:
+                    await page.evaluate('(c) => demo.set(c)', {'view': view, 'res': 1, 'hsr': True, 'shell': True, 'heat': 0, 'measure': False, 'voxel': vox, 'unclamped': True})
+                    m = await page.evaluate('demo.measure(0)')
+                    ms = await page.evaluate('(n) => demo.bench(n)', a.frames)
+                    g = await page.evaluate('demo.holes(0)')
+                    await page.evaluate('(c) => demo.set(c)', {'voxel': vox}); await page.evaluate('demo.seek(0)'); await page.screenshot(path=os.path.join(a.out, 'voxel-%s-%d.png' % (view, vox)))
+                    print('| %s | %s | %d | %.2f | %.1f | %s | %.2f |' % (name, how, m['quads'], m['written']['avg'], m['covered']['avg'], '%.2f%%' % (g['gaps'] * 100) if not vox else '0', ms))
+            print()
+            print('| tilt | parallel camera (village) | perspective camera (street) |')
+            print('| ---: | ---: | ---: |')
+            for deg in [60, 45, 30, 27, 24, 21, 18, 15, 12, 9, 6, 3]:
+                out = []
+                for view in ['village', 'street']:
+                    await page.evaluate('(c) => demo.set(c)', {'view': view, 'pitch': deg * 3.14159265 / 180, 'voxel': 0})
+                    out.append((await page.evaluate('demo.holes(0)'))['gaps'] * 100)
+                print('| %d | %.2f%% | %.2f%% |' % (deg, out[0], out[1]))
+            await browser.close()
+            return
         for view in VIEWS:
             for res, res_name in RES:
                 for hsr, shell, name in ORDERS:
-                    cfg = {'view': view, 'res': res, 'hsr': bool(hsr), 'shell': bool(shell), 'heat': 0, 'measure': False}
+                    cfg = {'view': view, 'res': res, 'hsr': bool(hsr), 'shell': bool(shell), 'heat': 0, 'measure': False, 'voxel': 0}
                     await page.evaluate('(c) => demo.set(c)', cfg)
                     m = await page.evaluate('demo.measure(0)')
                     ms = await page.evaluate('(n) => demo.bench(n)', a.frames)

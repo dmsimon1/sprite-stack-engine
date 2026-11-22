@@ -1,17 +1,18 @@
 // main.js: the demo. Builds the village, moves what moves, flies the camera, shows the numbers.
 //
 // Mouse: drag turns and tilts, shift-drag or right-drag pans, wheel zooms.
-// Keys: P perspective / parallel, H hidden-surface removal, O overdraw heat map (written, covered, off), M measure,
+// Keys: V voxel mode (by itself, on, off), P perspective / parallel, H hidden-surface removal, O overdraw heat map (written, covered, off), M measure,
 //       R internal resolution (1x, 1/2, 1/3), L shell stacks, T thickness fill, G edge guard,
 //       S shadows, A ambient occlusion, B bloom, N time of day (drifting, afternoon, golden hour, dusk),
 //       Space stops and starts the slow turn, U hides the read-out.
 // The same switches work in the address, for capture: ?mode=persp&hsr=1&heat=1&res=2&shell=0&fill=1&guard=1&tod=0.6
 //   &yaw=..&pitch=..&dist=..&tx=..&ty=..   ?view=street   ?tour plays the camera move   ?hud=1.6 enlarges the read-out
-//   ?nohud hides it   ?hold stops the clock (demo.seek(frame))
+//   ?voxel=1 / 0 forces voxel mode on / off   ?unclamped lets flat slices go below their limits, to see them fail
+//   ?nohud hides it   ?hold stops the clock (demo.seek(frame))   ?follow=3&face=0 keeps soldier 3 in view, seen from the front
 (function () {
   'use strict';
   const Q = new URLSearchParams(location.search), num = function (k, d) { return Q.has(k) ? parseFloat(Q.get(k)) : d; };
-  const canvas = document.getElementById('c'), hud = document.getElementById('hud'), statsEl = document.getElementById('stats'), keysEl = document.getElementById('keys');
+  const canvas = document.getElementById('c'), hud = document.getElementById('hud'), badge = document.getElementById('badge'), statsEl = document.getElementById('stats'), keysEl = document.getElementById('keys');
   const E = Engine.create(canvas), SCALE = 0.45, STEP = 1 / 60, TOUR = 1080, TAU = Math.PI * 2;
   const WORLD = Scene.WORLD, G = WORLD.ground;
 
@@ -93,19 +94,33 @@
     village: { mode: 'ortho', tx: 300, ty: 190, yaw: 0.62, pitch: 0.66, dist: 280 },
     bridge: { mode: 'persp', tx: 150, ty: 198, yaw: 2.6, pitch: 0.5, dist: 170 },
     top: { mode: 'ortho', tx: 256, ty: 192, yaw: Math.PI / 2, pitch: 1.5, dist: 620 },
-    low: { mode: 'ortho', tx: 256, ty: 192, yaw: 0.62, pitch: 0.2, dist: 500 }
+    low: { mode: 'ortho', tx: 256, ty: 192, yaw: 0.62, pitch: 0.2, dist: 500 },
+    level: { mode: 'persp', tx: 250, ty: 189, tz: 10, yaw: 0.02, pitch: 0.14, dist: 110 }      // nearly along the ground: only voxel mode holds here
   };
   const v0 = VIEWS[Q.get('view') || 'overview'] || VIEWS.overview;
-  const cam = { mode: Q.get('mode') || v0.mode, tx: num('tx', v0.tx), ty: num('ty', v0.ty), yaw: num('yaw', v0.yaw), pitch: num('pitch', v0.pitch), dist: num('dist', v0.dist), fov: 40 * Math.PI / 180 };
-  const TOURING = Q.has('tour'), HELD = Q.has('hold');
+  const cam = { tz: v0.tz || 0, mode: Q.get('mode') || v0.mode, tx: num('tx', v0.tx), ty: num('ty', v0.ty), yaw: num('yaw', v0.yaw), pitch: num('pitch', v0.pitch), dist: num('dist', v0.dist), fov: 40 * Math.PI / 180 };
+  const TOURING = Q.has('tour'), HELD = Q.has('hold'), FOLLOW = num('follow', -1);
   // tod: the time of day, 0 afternoon to 1 dusk; -1 lets it drift by itself (the live page does; a held page stays put)
   const S = { hsr: num('hsr', 1) === 1, heat: num('heat', 0), res: num('res', 1), shell: num('shell', 1) === 1, fill: num('fill', 1) === 1, guard: num('guard', 1) === 1,
-    shadows: num('shadows', 1) === 1, ao: num('ao', 1) === 1, bloom: num('bloom', 1) === 1, tod: num('tod', HELD || TOURING ? 0.25 : -1), measure: num('measure', 0) === 1, orbit: !HELD && !TOURING && !Q.has('yaw') };
+    voxel: num('voxel', -1), unclamped: Q.has('unclamped'), shadows: num('shadows', 1) === 1, ao: num('ao', 1) === 1, bloom: num('bloom', 1) === 1, tod: num('tod', HELD || TOURING ? 0.25 : -1), measure: num('measure', 0) === 1, orbit: !HELD && !TOURING && !Q.has('yaw') };
   let list = [], blobs = [], lamps = [], frame = 0, env = Scene.light(0), autoScale = 1;
 
+  // ---------------------------------------------------------------- voxel mode: when
+  // Flat slices stay solid while two things hold (both measured: see "Voxel mode" in the README).
+  //  - The tilt is at least VOXEL_TILT. Below it a slice is nearly edge-on, and thin parts (a soldier's limbs, a
+  //    pole, a fence rail) come apart first. In perspective the lowest ray on screen is what counts, and height
+  //    order also stops being depth order once a ray no longer points down.
+  //  - No layer is taller on screen than the fill will cover (48 rows): closer than that, gaps open between copies.
+  // S.voxel: -1 the engine decides, 1 always, 0 never. With voxel mode allowed the camera may go down to the horizon.
+  const VOXEL_TILT = 15 * Math.PI / 180, VOXEL_MARGIN = 4 * Math.PI / 180, VOXEL_ROWS = 48;
+  let voxel = false, rowsSeen = 0;
+  function tiltLimit() { return cam.mode === 'persp' ? cam.fov / 2 + VOXEL_MARGIN : VOXEL_TILT; }      // perspective: the highest ray on screen must still come down, with a little to spare
+  function needVoxel() { return cam.pitch < tiltLimit() || rowsSeen > VOXEL_ROWS; }
   function clampCam() {
-    const lowest = cam.mode === 'persp' ? cam.fov / 2 + 0.06 : 0.1;     // in perspective every view ray must still point downward
-    cam.pitch = Math.max(lowest, Math.min(Math.PI / 2 - 0.001, cam.pitch)); cam.dist = Math.max(40, Math.min(1100, cam.dist));
+    // without voxel mode: in perspective every view ray must still point downward (height order is depth order only then)
+    const lowest = S.voxel !== 0 || S.unclamped ? 0.03 : cam.mode === 'persp' ? cam.fov / 2 + 0.06 : 0.1;
+    cam.pitch = Math.max(lowest, Math.min(Math.PI / 2 - 0.001, cam.pitch)); cam.dist = Math.max(16, Math.min(1100, cam.dist));
+    voxel = S.voxel === 1 || (S.voxel < 0 && needVoxel());
   }
   // The film: five shots with cuts between them. Two in the parallel view, turning over the whole map: first the
   // picture, then the same picture as a heat map of fragments written (whole stacks, shell stacks, hidden-surface
@@ -169,7 +184,9 @@
   }
 
   function draw(f, measure) {
-    frame = f; simTo(f); if (TOURING) tour(f); else if (S.orbit) cam.yaw = v0.yaw + f / 60 * 0.06; clampCam();
+    frame = f; simTo(f); if (TOURING) tour(f); else if (S.orbit) cam.yaw = v0.yaw + f / 60 * 0.06;
+    if (walkers[FOLLOW]) { const q = walkers[FOLLOW].path.at(walkers[FOLLOW].s); cam.tx = q[0]; cam.ty = q[1]; cam.tz = Scene.groundAt(q[0], q[1]) + 8; if (Q.has('face')) cam.yaw = q[2] + Math.PI + num('face', 0); }      // ?follow=3&face=0: keep a soldier in view, from the front
+    clampCam();
     const t = f / 60, set = SETS[S.shell ? 1 : 0], st = statics[S.shell ? 1 : 0];
     env = Scene.light(S.tod < 0 ? 0.5 - 0.5 * Math.cos(t * TAU / 80) : S.tod); env.cloud = 0.5 * (1 - env.glow);
     list.length = 0; blobs = []; lamps = [];
@@ -179,8 +196,10 @@
     });
     animate(t, set);
     for (let i = 0; i < st.length; i++) list.push(st[i]);
-    E.render({ cam: cam, list: list, atlas: set.atlas, hsr: S.hsr, fill: S.fill, guard: S.guard, heat: S.heat, measure: measure || S.measure, scale: S.res * autoScale,
+    E.render({ cam: cam, list: list, atlas: set.atlas, hsr: S.hsr, fill: S.fill, guard: S.guard, voxel: voxel, heat: S.heat, measure: measure || S.measure, scale: S.res * autoScale,
       shadows: S.shadows, ao: S.ao, bloom: S.bloom, light: env, lamps: lamps, blobs: blobs, water: pal.names.water2, ground: G, time: t });
+    rowsSeen = E.stats.rows;                                   // how tall the tallest layer was on screen: next frame's decision
+    badge.classList.toggle('on', voxel);
   }
 
   // The canvas is as large as the window in device pixels; the picture inside it is kept to about two million
@@ -191,8 +210,9 @@
     const tod = env.t < 0.3 ? 'afternoon' : env.t < 0.82 ? 'golden hour' : 'dusk';
     statsEl.textContent = [
       s.iw + ' x ' + s.ih + (s.iw !== canvas.width ? ' (shown at ' + canvas.width + ' x ' + canvas.height + ')' : '') + '   ' + (cam.mode === 'persp' ? 'perspective' : 'parallel') + ' camera, tilt ' + Math.round(cam.pitch * 180 / Math.PI) + '°   ' + tod,
-      (S.hsr ? 'hidden-surface removal: top first, depth test' : 'painter order: bottom first, no depth test') + '   ' + (S.shell ? 'shell' : 'whole') + ' stacks' + (S.fill ? '' : '   fill off') + (S.guard ? '' : '   guard off'),
-      th(s.slices) + ' slices, ' + th(s.instances) + ' quads',
+      (voxel ? 'VOXEL MODE: a box per slice, depth test' : S.hsr ? 'hidden-surface removal: top first, depth test' : 'painter order: bottom first, no depth test') + '   ' + (S.shell ? 'shell' : 'whole') + ' stacks' + (voxel ? '' : (S.fill ? '' : '   fill off') + (S.guard ? '' : '   guard off')),
+      'voxel mode ' + (voxel ? 'on' : 'off') + (S.voxel === 1 ? ' (forced on)' : S.voxel === 0 ? ' (forced off)' : voxel ? (rowsSeen > VOXEL_ROWS ? ' (a layer is ' + Math.round(rowsSeen) + ' rows tall, over ' + VOXEL_ROWS + ')' : ' (the view is under ' + Math.round(tiltLimit() * 180 / Math.PI) + '\u00b0)') : ' (flat slices hold above ' + Math.round(tiltLimit() * 180 / Math.PI) + '\u00b0)') + '   V changes it',
+      th(s.slices) + ' slices, ' + th(s.instances) + (voxel ? ' boxes' : ' quads'),
       s.written ? 'fragments per pixel: ' + f1(s.written.avg) + ' written (' + Math.round(s.written.max) + ' max), ' + f1(s.covered.avg) + ' covered (' + Math.round(s.covered.max) + ' max)' : 'fragments per pixel: press M to measure',
       'frame ' + f1(ms) + ' ms' + (s.gpuMs !== null ? '   gpu ' + f1(s.gpuMs) + ' ms' : '') + '   build ' + f1(s.cpuMs) + ' ms' + (S.measure || S.heat ? '   (with the count pass)' : '')
     ].concat(S.heat ? ['heat map, fragments ' + (S.heat === 1 ? 'written' : 'covered') + ':  black 0  blue 1  green 4  yellow 16  red 64  white 256'] : []).join('\n');
@@ -216,6 +236,7 @@
     else if (k === 's') S.shadows = !S.shadows; else if (k === 'a') S.ao = !S.ao; else if (k === 'b') S.bloom = !S.bloom; else if (k === 'm') S.measure = !S.measure;
     else if (k === 'n') S.tod = S.tod < 0 ? 0 : S.tod < 0.3 ? 0.55 : S.tod < 0.8 ? 1 : -1;
     else if (k === ' ') { S.orbit = !S.orbit; v0.yaw = cam.yaw - frame / 60 * 0.06; e.preventDefault(); }
+    else if (k === 'v') S.voxel = S.voxel < 0 ? 1 : S.voxel === 1 ? 0 : -1;
     else if (k === 'u') hud.classList.toggle('off');
   });
   window.addEventListener('resize', fit);
@@ -236,10 +257,20 @@
   window.demo = {
     frames: TOUR, fps: 60, engine: E, cam: cam, state: S, views: VIEWS, scene: Scene,
     ready: Promise.resolve({ frames: TOUR, fps: 60 }),
-    seek: function (f) { playing = false; fit(); draw(f); showHud(E.stats.cpuMs); return f; },
-    set: function (o) { Object.keys(o).forEach(function (k) { if (k in S) S[k] = o[k]; else if (k === 'view') Object.assign(cam, VIEWS[o[k]]); else cam[k] = o[k]; }); },
+    seek: function (f) { playing = false; fit(); draw(f); draw(f); showHud(E.stats.cpuMs); return f; },      // twice: the choice of voxel mode follows the frame before
+    set: function (o) { Object.keys(o).forEach(function (k) { if (k in S) S[k] = o[k]; else if (k === 'view') { cam.tz = 0; Object.assign(cam, VIEWS[o[k]]); } else cam[k] = o[k]; }); },
     // one frame with the count pass: fragments per pixel, exactly
-    measure: function (f) { playing = false; fit(); draw(f || 0, true); showHud(E.stats.cpuMs); const s = E.stats; return { canvas: [canvas.width, canvas.height], internal: [s.iw, s.ih], slices: s.slices, quads: s.instances, written: s.written, covered: s.covered, pixelsHit: s.pixelsHit / s.pixels, exact: s.exact, renderer: E.renderer }; },
+    measure: function (f) { playing = false; fit(); draw(f || 0); draw(f || 0, true); showHud(E.stats.cpuMs); const s = E.stats; return { canvas: [canvas.width, canvas.height], internal: [s.iw, s.ih], voxel: voxel, rows: s.rows, slices: s.slices, quads: s.instances, written: s.written, covered: s.covered, pixelsHit: s.pixelsHit / s.pixels, exact: s.exact, renderer: E.renderer }; },
+    // How far flat slices fail in the current view: draw it as boxes (which are solid from anywhere), then as flat
+    // slices, and count the pixels where the flat picture shows something more than a layer lower: a gap seen
+    // through. Returns that as a share of the pixels that show an object at all. This is how VOXEL_TILT was set.
+    holes: function (f) {
+      const was = S.voxel, free = S.unclamped; playing = false; fit(); S.unclamped = true;
+      S.voxel = 1; draw(f || 0); const a = E.heights(); S.voxel = 0; draw(f || 0); const b = E.heights(); S.voxel = was; S.unclamped = free;
+      const w = E.stats.iw; let seen = 0, gaps = 0;
+      for (let i = w + 1; i < a.length - w - 1; i++) if (a[i] > G + 1.5) { seen++; const low = b[i] + 1.25; if (a[i] > low && a[i - 1] > low && a[i + 1] > low && a[i - w] > low && a[i + w] > low) gaps++; }      // (not the outline: its neighbours must stand above the gap too)
+      return { gaps: gaps / Math.max(1, seen), pixels: seen, rows: E.stats.rows };
+    },
     // n frames one after another, each waited for: milliseconds per frame, everything included
     bench: function (n) { playing = false; fit(); for (let i = 0; i < 10; i++) { draw(i); E.finish(); } const a = performance.now(); for (let i = 0; i < n; i++) { draw(10 + i); E.finish(); } return (performance.now() - a) / n; }
   };

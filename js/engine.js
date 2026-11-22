@@ -13,9 +13,13 @@
 //   4. What glows (fire always, lamps and windows at dusk) is blurred at a quarter of the size and added back: bloom.
 //   5. The result is copied to the canvas, scaled up without smoothing if the internal resolution is lower.
 // An optional count pass draws the same instances additively to measure overdraw exactly.
+//
+// VOXEL MODE is the second way the slice pass can draw (see the block at VS_VOXEL). Flat slices stay solid only
+// while the camera looks down on them steeply enough; below that the engine draws every slice as the box it
+// stands for, with side faces and a depth test, and stacks are solid from any angle.
 (function (global) {
   'use strict';
-  const FL = 11;                      // floats per instance: pos 3, rot 1, rect 4, offset 2, scale 1
+  const FL = 12;                      // floats per instance: pos 3, rot 1, rect 4, offset 2, scale 1, box height 1 (voxel mode)
   const NB = 2048, ZQ = 16;           // height buckets, and buckets per unit of height
   const HMAX = 128;                   // tallest thing the G-buffer and the height map can hold
   const LAMPS = 8, BLOBS = 24, STEPS = 48, REACH = 195;
@@ -40,7 +44,7 @@
     const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch), cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
     const f = [cp * cy, cp * sy, -sp], r = [sy, -cy, 0], u = [cy * sp, sy * sp, cp];
     const ortho = cam.mode !== 'persp', th = Math.tan(cam.fov / 2), back = ortho ? 1500 : cam.dist;
-    const eye = [cam.tx - f[0] * back, cam.ty - f[1] * back, -f[2] * back];
+    const eye = [cam.tx - f[0] * back, cam.ty - f[1] * back, (cam.tz || 0) - f[2] * back];      // tz: the height of the point looked at (the ground, unless set)
     const dot = function (a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
     const V = new Float32Array([r[0], u[0], -f[0], 0, r[1], u[1], -f[1], 0, r[2], u[2], -f[2], 0, -dot(r, eye), -dot(u, eye), dot(f, eye), 1]);
     let P;
@@ -91,6 +95,88 @@
     if (t.r == 0.0) discard;
     o = vec4(u_unit, 0.0, 0.0, 0.0);                          // every fragment written
   }`;
+  // ================================================================ VOXEL MODE
+  // What it is. A slice is a picture of one layer of an object, and the layer is one unit thick. Normal sprite
+  // stacking draws the picture as a flat quad and hides the gaps between layers by drawing it again for every
+  // screen row the layer is tall ("thickness fill"). That works while the camera looks down. As the view drops
+  // towards the horizon each flat quad shrinks to a line, a layer needs more copies than the engine will draw
+  // (the cap is 48), and stacks come apart into separate layers.
+  // Voxel mode draws each slice as what it stands for: a box one layer tall, with a top and four side faces.
+  // The box is drawn once. Its fragment shader starts where the view ray enters the box and steps from texel
+  // to texel of the slice until it meets a filled one (so every filled pixel of the slice becomes a little
+  // column with its own sides) or leaves the box. The point it finds writes its own depth, and the depth test
+  // is always on, so boxes hide one another correctly from any direction, level or even looking up.
+  // When. main.js switches it on by itself when the tilt drops under a measured threshold or a layer would be
+  // taller on screen than the fill can cover, shows a badge while it is on, and has a key to force it.
+  // Cost. One box (12 triangles) per slice instead of up to 48 quads, a short loop per fragment, and no early
+  // depth test, because the shader writes depth. The numbers are in the README.
+  const VS_VOXEL = `#version 300 es
+  layout(location=0) in vec3 a_pos; layout(location=1) in float a_rot; layout(location=2) in vec4 a_rect;
+  layout(location=3) in vec2 a_off; layout(location=4) in float a_scale; layout(location=5) in vec3 a_box; layout(location=6) in float a_span;
+  uniform mat4 u_vp; uniform vec3 u_eye, u_fwd; uniform float u_ortho;
+  out vec3 v_p, v_d; flat out vec4 v_rect, v_base; flat out vec3 v_how; flat out vec2 v_off;
+  void main() {
+    float c = cos(a_rot), s = sin(a_rot);
+    vec2 l = (a_off + (a_box.xy - 0.5) * a_rect.zw) * a_scale;
+    vec3 w = a_pos + vec3(l.x * c - l.y * s, l.x * s + l.y * c, a_box.z * a_span);
+    gl_Position = u_vp * vec4(w, 1.0);
+    v_p = vec3(a_box.xy * a_rect.zw, a_box.z * a_span / a_scale);       // where this corner is inside the box, in texels (a layer is one texel tall)
+    vec3 d = u_ortho > 0.5 ? u_fwd : w - u_eye;                            // the view ray through this corner
+    v_d = vec3(d.x * c + d.y * s, -d.x * s + d.y * c, d.z);               // turned into the slice's own frame
+    v_rect = a_rect; v_base = vec4(a_pos, a_scale); v_how = vec3(c, s, a_span / a_scale); v_off = a_off;
+  }`;
+  const WALK = `
+  uniform sampler2D u_atlas; uniform mat4 u_vp;
+  in vec3 v_p, v_d; flat in vec4 v_rect, v_base; flat in vec3 v_how;
+  // Step the ray through the slice's texels (the classic grid walk). t: the texel hit. q: where, in texels.
+  bool walk(out vec4 t, out vec3 q) {
+    vec3 dir = normalize(v_d); vec2 size = v_rect.zw;
+    vec3 p = vec3(clamp(v_p.xy, vec2(0.001), size - 0.001), v_p.z);
+    ivec2 cell = ivec2(p.xy), lim = ivec2(size + 0.5), stp = ivec2(dir.x < 0.0 ? -1 : 1, dir.y < 0.0 ? -1 : 1);
+    vec2 inv = 1.0 / max(abs(dir.xy), vec2(0.00001));
+    vec2 next = vec2(dir.x < 0.0 ? p.x - float(cell.x) : float(cell.x) + 1.0 - p.x, dir.y < 0.0 ? p.y - float(cell.y) : float(cell.y) + 1.0 - p.y) * inv;
+    // the ray leaves the box through its bottom if it points down, through its top if it points up
+    float leave = dir.z < -0.00001 ? p.z / -dir.z : dir.z > 0.00001 ? (v_how.z - p.z) / dir.z : 1000000.0, k = 0.0; bool hit = false;
+    for (int i = 0; i < 48; i++) {
+      t = texelFetch(u_atlas, ivec2(v_rect.xy) + cell, 0);
+      if (t.r > 0.0) { hit = true; break; }
+      if (next.x < next.y) { k = next.x; next.x += inv.x; cell.x += stp.x; } else { k = next.y; next.y += inv.y; cell.y += stp.y; }
+      if (k > leave || cell.x < 0 || cell.y < 0 || cell.x >= lim.x || cell.y >= lim.y) break;
+    }
+    q = p + dir * k; return hit;
+  }
+  // the depth of that point, so boxes hide one another correctly whatever order they are drawn in
+  float depthOf(vec3 q, vec2 off, out float h) {
+    vec2 l = (off + q.xy - v_rect.zw * 0.5) * v_base.w; h = v_base.z + clamp(q.z, 0.0, v_how.z) * v_base.w;
+    vec4 c = u_vp * vec4(v_base.xy + vec2(l.x * v_how.x - l.y * v_how.y, l.x * v_how.y + l.y * v_how.x), h, 1.0);
+    return c.z / c.w * 0.5 + 0.5;
+  }`;
+  const FS_GVOXEL = `#version 300 es
+  precision highp float;
+  ${WALK}
+  flat in vec2 v_off;
+  layout(location=0) out vec4 o0; layout(location=1) out vec4 o1;
+  void main() {
+    vec4 t; vec3 q; if (!walk(t, q)) discard;
+    vec3 n = t.gba * 2.0 - 1.0; n.xy = vec2(n.x * v_how.x - n.y * v_how.y, n.x * v_how.y + n.y * v_how.x);
+    float hw; gl_FragDepth = depthOf(q, v_off, hw);
+    o0 = vec4(t.r, n * 0.5 + 0.5);
+    float h = clamp(hw / ${HMAX}.0, 0.0, 1.0) * 65535.0, hi = floor(h / 256.0);
+    o1 = vec4(hi / 255.0, (h - hi * 256.0) / 255.0, 0.0, 1.0);
+  }`;
+  const FS_COUNTVOXEL = `#version 300 es
+  precision highp float;
+  ${WALK}
+  flat in vec2 v_off;
+  uniform int u_all; uniform float u_unit;
+  out vec4 o;
+  void main() {
+    if (u_all == 1) { o = vec4(0.0, u_unit, 0.0, 0.0); gl_FragDepth = gl_FragCoord.z; return; }
+    vec4 t; vec3 q; if (!walk(t, q)) discard;
+    float hw; gl_FragDepth = depthOf(q, v_off, hw);
+    o = vec4(u_unit, 0.0, 0.0, 0.0);
+  }`;
+  // ================================================================ end of voxel mode's shaders
   const VS_FULL = `#version 300 es
   layout(location=5) in vec2 a_corner;
   out vec2 v_uv;
@@ -141,7 +227,9 @@
     float h = outer ? u_world.z : height(px);
     // the world position: where this pixel's view ray meets the plane at the stored height
     vec2 ndc = v_uv * 2.0 - 1.0; vec4 a = u_inv * vec4(ndc, -1.0, 1.0), b = u_inv * vec4(ndc, 1.0, 1.0); a /= a.w; b /= b.w;
-    vec3 p = mix(a.xyz, b.xyz, (h - a.z) / (b.z - a.z));
+    float fall = b.z - a.z; bool level = fall > -0.0001;    // a ray that does not come down (voxel mode lets the camera look along the ground)
+    if (outer && (level || (h - a.z) / fall > 1.0)) { o = vec4(finish(mix(u_hazeCol, u_hazeCol * 0.86 + u_skyCol * 0.3, clamp(normalize(b.xyz - a.xyz).z * 4.0, 0.0, 1.0))), 0.0); return; }      // sky
+    vec3 p = mix(a.xyz, b.xyz, (h - a.z) / (abs(fall) < 0.0001 ? -0.0001 : fall));
     float t = u_world.w;
 
     // The edge of the map dissolves into haze: no hard border, and things driving off it fade out.
@@ -315,6 +403,7 @@
       return t;
     }
     const pG = program(VS_SLICE, FS_G), pCount = program(VS_SLICE, FS_COUNT), pLight = program(VS_FULL, FS_LIGHT), pHeat = program(VS_FULL, FS_HEAT);
+    const pGVoxel = program(VS_VOXEL, FS_GVOXEL), pCountVoxel = program(VS_VOXEL, FS_COUNTVOXEL);
     const pBright = program(VS_FULL, FS_BRIGHT), pBlur = program(VS_FULL, FS_BLUR), pPost = program(VS_FULL, FS_POST);
 
     // the four corners of a quad (one small buffer, shared), the instance buffer, and their vertex arrays
@@ -322,8 +411,16 @@
     let cap = 1 << 16, inst = new Float32Array(cap * FL), tmp = new Float32Array(cap * FL), keys = new Uint16Array(cap);
     const counts = new Uint32Array(NB + 1);
     const vao = gl.createVertexArray(), buf = gl.createBuffer(); gl.bindVertexArray(vao); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    [[0, 3, 0], [1, 1, 3], [2, 4, 4], [3, 2, 8], [4, 1, 10]].forEach(function (a) { gl.enableVertexAttribArray(a[0]); gl.vertexAttribPointer(a[0], a[1], gl.FLOAT, false, FL * 4, a[2] * 4); gl.vertexAttribDivisor(a[0], 1); });
+    const perInstance = function (list) { list.forEach(function (a) { gl.enableVertexAttribArray(a[0]); gl.vertexAttribPointer(a[0], a[1], gl.FLOAT, false, FL * 4, a[2] * 4); gl.vertexAttribDivisor(a[0], 1); }); };
+    perInstance([[0, 3, 0], [1, 1, 3], [2, 4, 4], [3, 2, 8], [4, 1, 10]]);
     gl.bindBuffer(gl.ARRAY_BUFFER, corners); gl.enableVertexAttribArray(5); gl.vertexAttribPointer(5, 2, gl.FLOAT, false, 0, 0);
+    // voxel mode: a box's top, four sides and bottom as triangles, each wound anticlockwise seen from outside
+    const box = gl.createBuffer(), vaoVoxel = gl.createVertexArray(); gl.bindVertexArray(vaoVoxel); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    perInstance([[0, 3, 0], [1, 1, 3], [2, 4, 4], [3, 2, 8], [4, 1, 10], [6, 1, 11]]);
+    gl.bindBuffer(gl.ARRAY_BUFFER, box); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+      0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1,   0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1,   1, 1, 0, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1,
+      1, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1,   0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1,   0, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(5); gl.vertexAttribPointer(5, 3, gl.FLOAT, false, 0, 0);
     const vaoFull = gl.createVertexArray(); gl.bindVertexArray(vaoFull); gl.bindBuffer(gl.ARRAY_BUFFER, corners); gl.enableVertexAttribArray(5); gl.vertexAttribPointer(5, 2, gl.FLOAT, false, 0, 0);
 
     // render targets, made again when the internal resolution changes
@@ -355,8 +452,8 @@
     // Turn slices into sorted instances. list: [{ stack, x, y, z, rot, scale, only (one slice index, or -1 for all),
     // shx, shy (optional: how far the stack leans per unit of height, for trees and wheat in the wind) }]
     function build(list, M, opt) {
-      const ppuOrtho = ih / (2 * opt.cam.dist * M.th), vp = M.vp;
-      let n = 0, slices = 0;
+      const ppuOrtho = ih / (2 * opt.cam.dist * M.th), vp = M.vp, voxel = !!opt.voxel;
+      let n = 0, slices = 0, tallest = 0;
       // A shell stack is hollow, so a shallow view ray must not slip between two copies of a slice and through the
       // shell: the copies have to be closer together than the shell is deep along that ray.
       const slope = Math.tan(Math.max(0.06, M.ortho ? opt.cam.pitch : opt.cam.pitch - opt.cam.fov * 0.35));
@@ -364,25 +461,40 @@
         const it = list[q], st = it.stack, sc = it.scale, one = it.only >= 0;
         // Leave out what the camera cannot see: a sphere round the stack against the edges of the view.
         const zc = one ? it.z : it.z + st.n * sc * 0.5, R = (one ? st.radius : Math.hypot(st.radius, st.n * 0.5)) * sc + 2;
-        const cw = vp[3] * it.x + vp[7] * it.y + vp[11] * zc + vp[15];
+        const cw = vp[3] * it.x + vp[7] * it.y + vp[11] * zc + vp[15], cx = vp[0] * it.x + vp[4] * it.y + vp[8] * zc + vp[12], cy = vp[1] * it.x + vp[5] * it.y + vp[9] * zc + vp[13];
         if (!M.ortho && cw < -R) continue;                     // behind the camera
-        if ((M.ortho || cw > R) && (Math.abs(vp[0] * it.x + vp[4] * it.y + vp[8] * zc + vp[12]) - R * M.px > cw || Math.abs(vp[1] * it.x + vp[5] * it.y + vp[9] * zc + vp[13]) - R * M.py > cw)) continue;
+        if ((M.ortho || cw > R) && (Math.abs(cx) - R * M.px > cw || Math.abs(cy) - R * M.py > cw)) continue;
+        const sides = one || st.slices.length > 1 || st.slices[0].sides;
         // how many screen rows one layer of this stack is tall: that many copies of each slice
         let rows = 1;
         if (opt.fill) {
           if (M.ortho) rows = ppuOrtho * M.cp * sc;
-          else { const d = Math.max(4, (it.x - M.eye[0]) * M.f[0] + (it.y - M.eye[1]) * M.f[1] + (it.z - M.eye[2]) * M.f[2] - st.radius * sc); rows = ih / (2 * d * M.th) * Math.min(1, M.cp + 0.25) * sc * 1.15; }
+          else {
+            // the nearest this stack can be: its middle less its radius, but no nearer than where the lowest ray on
+            // screen comes down to the stack's top (a ground tile under the camera is not really four units away)
+            const reach = (M.eye[2] - it.z - st.n * sc) / Math.sin(Math.min(1.5, opt.cam.pitch + opt.cam.fov / 2)) * Math.cos(opt.cam.fov / 2);
+            const d = Math.max(4, reach, (it.x - M.eye[0]) * M.f[0] + (it.y - M.eye[1]) * M.f[1] + (it.z - M.eye[2]) * M.f[2] - st.radius * sc); rows = ih / (2 * d * M.th) * Math.min(1, M.cp + 0.25) * sc * 1.15;
+          }
         }
-        const copies = st.flat ? 1 : Math.max(st.shell ? Math.ceil(1 / (st.shell * slope)) : 1, Math.min(48, Math.ceil(rows)));
+        if (rows > tallest && sides && Math.abs(cx) < cw && Math.abs(cy) < cw) tallest = rows;      // the tallest layer on screen (of stacks whose middle is in view and that have sides to fill)
+        const copies = voxel ? 1 : Math.max(st.shell ? Math.ceil(1 / (st.shell * slope)) : 1, Math.min(48, Math.ceil(rows)));
         const a = one ? it.only : 0, b = one ? it.only + 1 : st.slices.length, shx = it.shx || 0, shy = it.shy || 0;
         // (a layer with no side, flat ground, needs no fill: it is drawn once, at the top of its layer)
         if (n + (b - a) * copies > cap) { while (n + (b - a) * copies > cap) cap *= 2; const i2 = new Float32Array(cap * FL), t2 = new Float32Array(cap * FL), k2 = new Uint16Array(cap); t2.set(tmp); k2.set(keys); inst = i2; tmp = t2; keys = k2; }
         for (let s = a; s < b; s++) {
-          const sl = st.slices[s], z0 = it.z + (one ? 0 : sl.z * sc), first = sl.sides || st.flat ? 0 : copies - 1; slices++;
+          const sl = st.slices[s], z0 = it.z + (one ? 0 : sl.z * sc), first = sl.sides ? 0 : copies - 1; slices++;
+          if (voxel) {
+            // VOXEL MODE: one box per slice, a layer tall (paper thin, at the top of its layer, for ground with no side)
+            const j = n * FL, up = z0 - it.z, thin = !sl.sides;
+            tmp[j] = it.x + shx * up; tmp[j + 1] = it.y + shy * up; tmp[j + 2] = z0 + (thin ? 0.97 * sc : 0); tmp[j + 3] = it.rot;
+            tmp[j + 4] = sl.u; tmp[j + 5] = sl.v; tmp[j + 6] = sl.w; tmp[j + 7] = sl.h; tmp[j + 8] = sl.ox; tmp[j + 9] = sl.oy; tmp[j + 10] = sc; tmp[j + 11] = (thin ? 0.03 : 1) * sc;
+            keys[n++] = NB - 1 - Math.min(NB - 1, Math.max(0, Math.floor(z0 * ZQ)));      // highest first; the depth test does the rest
+            continue;
+          }
           for (let k = first; k < copies; k++) {
             const z = z0 + k / copies * sc, j = n * FL, up = z - it.z;
             tmp[j] = it.x + shx * up; tmp[j + 1] = it.y + shy * up; tmp[j + 2] = z; tmp[j + 3] = it.rot;
-            tmp[j + 4] = sl.u; tmp[j + 5] = sl.v; tmp[j + 6] = sl.w; tmp[j + 7] = sl.h; tmp[j + 8] = sl.ox; tmp[j + 9] = sl.oy; tmp[j + 10] = sc;
+            tmp[j + 4] = sl.u; tmp[j + 5] = sl.v; tmp[j + 6] = sl.w; tmp[j + 7] = sl.h; tmp[j + 8] = sl.ox; tmp[j + 9] = sl.oy; tmp[j + 10] = sc; tmp[j + 11] = 0;
             let key = Math.min(NB - 1, Math.max(0, Math.floor(z * ZQ))); if (opt.hsr) key = NB - 1 - key;      // painter: lowest first; hidden-surface removal: highest first
             keys[n++] = key;
           }
@@ -391,20 +503,22 @@
       counts.fill(0); for (let i = 0; i < n; i++) counts[keys[i] + 1]++;
       for (let i = 0; i < NB; i++) counts[i + 1] += counts[i];
       for (let i = 0; i < n; i++) { const d = counts[keys[i]]++ * FL, s = i * FL; for (let k = 0; k < FL; k++) inst[d + k] = tmp[s + k]; }
-      E.stats.instances = n; E.stats.slices = slices; return n;
+      E.stats.instances = n; E.stats.slices = slices; E.stats.rows = tallest; return n;
     }
 
     function drawSlices(prog, n, M, opt, hsr) {
-      gl.useProgram(prog.p); gl.bindVertexArray(vao);
-      gl.uniformMatrix4fv(prog.u.u_vp, false, M.vp); gl.uniform1f(prog.u.u_guard, opt.guard ? 1 / ih : 0);
+      gl.useProgram(prog.p); gl.uniformMatrix4fv(prog.u.u_vp, false, M.vp);
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, opt.atlas); gl.uniform1i(prog.u.u_atlas, 0);
       if (hsr) { gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(true); } else gl.disable(gl.DEPTH_TEST);
-      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n);
+      if (opt.voxel) {                                         // VOXEL MODE: boxes, 36 corners each, back faces culled
+        gl.bindVertexArray(vaoVoxel); gl.uniform3fv(prog.u.u_eye, M.eye); gl.uniform3fv(prog.u.u_fwd, M.f); gl.uniform1f(prog.u.u_ortho, M.ortho ? 1 : 0);
+        gl.enable(gl.CULL_FACE); gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, n); gl.disable(gl.CULL_FACE);
+      } else { gl.bindVertexArray(vao); gl.uniform1f(prog.u.u_guard, opt.guard ? 1 / ih : 0); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n); }
       gl.disable(gl.DEPTH_TEST);
     }
     function pass(fbo, w, h, prog, tex) { gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, w, h); gl.useProgram(prog.p); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(prog.u.u_tex, 0); }
 
-    // opt: { cam, list, atlas, hsr, fill, guard, heat (0 off, 1 written, 2 covered), measure, scale (canvas pixels per
+    // opt: { cam, list, atlas, hsr, fill, guard, voxel (draw boxes instead of flat quads), heat (0 off, 1 written, 2 covered), measure, scale (canvas pixels per
     //        internal pixel), shadows, ao, bloom, water (palette index), time (seconds),
     //        light { sun, sunCol, skyCol, bounceCol, hazeCol, hazeK, glow, exposure, outer, cloud },
     //        lamps [[x, y, z, reach, r, g, b]], blobs [[x, y, top, radius, bottom]] }
@@ -413,19 +527,20 @@
       targets(Math.max(1, Math.round(W / opt.scale)), Math.max(1, Math.round(H / opt.scale)));
       const M = cameraMatrices(opt.cam, iw / ih), n = build(opt.list, M, opt);
       if (timerExt && !query) { query = gl.createQuery(); gl.beginQuery(timerExt.TIME_ELAPSED_EXT, query); timing = true; }
-      gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, inst.subarray(0, n * FL), gl.DYNAMIC_DRAW);
+      gl.bindVertexArray(null); gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, inst.subarray(0, n * FL), gl.DYNAMIC_DRAW);
       gl.viewport(0, 0, iw, ih); gl.disable(gl.BLEND);
 
       // the slice pass: G-buffer only
       gl.bindFramebuffer(gl.FRAMEBUFFER, fboG); gl.clearColor(0, 0, 0, 0); gl.clearDepth(1); gl.depthMask(true); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-      drawSlices(pG, n, M, opt, opt.hsr);
+      const pg = opt.voxel ? pGVoxel : pG, pc = opt.voxel ? pCountVoxel : pCount, tested = opt.hsr || !!opt.voxel;      // voxel mode always tests depth
+      drawSlices(pg, n, M, opt, tested);
 
       // the count pass: the same draw again, adding 1 per fragment. Red: fragments written. Green: fragments the quads cover.
       if (opt.measure || opt.heat) {
         gl.bindFramebuffer(gl.FRAMEBUFFER, fboCount); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
         gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
-        gl.useProgram(pCount.p); gl.uniform1f(pCount.u.u_unit, UNIT); gl.uniform1i(pCount.u.u_all, 0); drawSlices(pCount, n, M, opt, opt.hsr);
-        gl.useProgram(pCount.p); gl.uniform1i(pCount.u.u_all, 1); drawSlices(pCount, n, M, opt, false);
+        gl.useProgram(pc.p); gl.uniform1f(pc.u.u_unit, UNIT); gl.uniform1i(pc.u.u_all, 0); drawSlices(pc, n, M, opt, tested);
+        gl.useProgram(pc.p); gl.uniform1i(pc.u.u_all, 1); drawSlices(pc, n, M, opt, false);
         gl.disable(gl.BLEND);
         if (opt.measure) {                                     // read the counts back: average and largest, per screen pixel
           const px = iw * ih, d = floatOK ? new Float32Array(px * 4) : new Uint8Array(px * 4); let sr = 0, sg = 0, mr = 0, mg = 0, any = 0;
@@ -477,6 +592,13 @@
       }
       E.stats.cpuMs = performance.now() - t0; E.stats.iw = iw; E.stats.ih = ih;
     };
+    // the height of what each pixel of the last frame shows (0 where nothing was drawn): for comparing two ways of drawing
+    E.heights = function () {
+      const d = new Uint8Array(iw * ih * 4), h = new Float32Array(iw * ih);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fboG); gl.readBuffer(gl.COLOR_ATTACHMENT1); gl.readPixels(0, 0, iw, ih, gl.RGBA, gl.UNSIGNED_BYTE, d); gl.readBuffer(gl.COLOR_ATTACHMENT0);
+      for (let i = 0; i < h.length; i++) h[i] = (d[i * 4] * 256 + d[i * 4 + 1]) / 65535 * HMAX;
+      return h;
+    };
     // wait until the GPU has really finished the frame (reading a pixel back forces it)
     E.finish = function () { gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4)); };
     return E;
@@ -489,7 +611,8 @@
     return {
       slice: function (st, i, x, y, z, rot) { put(st, i, x, y, z, rot); },
       stack: function (st, x, y, z, rot) { for (let i = 0; i < st.slices.length; i++) put(st, i, x, y, z + st.slices[i].z, rot); },
-      limb: function (st, a, b, n) { for (let i = 0; i < n; i++) { const t = (i + 0.5) / n; put(st, 0, a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t - 0.5, 0); } }
+      // (as many slices as it takes to keep them less than a layer apart, so a limb is solid from the side too)
+      limb: function (st, a, b, n) { n = Math.max(n, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) / 0.8)); for (let i = 0; i < n; i++) { const t = (i + 0.5) / n; put(st, 0, a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t - 0.5, 0); } }
     };
   }
 
