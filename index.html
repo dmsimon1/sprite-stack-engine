@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sprite stack engine</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #10131a; }
+  canvas { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; cursor: grab; }
+  #hud { position: fixed; left: 12px; top: 10px; margin: 0; padding: 8px 10px; background: rgba(12, 14, 20, 0.72); color: #eef1f6;
+         font: 13px/1.45 ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace; white-space: pre; border-radius: 4px; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<pre id="hud"></pre>
+<script src="js/art.js"></script>
+<script src="js/rig.js"></script>
+<script src="js/town.js"></script>
+<script src="js/characters.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
