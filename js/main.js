@@ -17,12 +17,33 @@
   const E = Engine.create(canvas), SCALE = 0.45, STEP = 1 / 60, TOUR = 1320, LOOP = TOUR / 60, TAU = Math.PI * 2;
   const WORLD = Scene.WORLD, G = WORLD.ground;
 
-  // ---------------------------------------------------------------- art: every stack twice, whole and as a shell
-  const pal = Scene.palette(), DEFS = Scene.stacks(), SETS = [];
+  // ---------------------------------------------------------------- art: every stack twice, whole and as a shell + AASpriteStacker 3D Volume Atlas
+  const pal = Scene.palette();
+  if (window.Spitfire) Spitfire.addPalette(pal);
+  const DEFS = Scene.stacks().concat(window.Spitfire ? Spitfire.createDefs() : []);
+  const DEFS_SORTED = DEFS.slice().sort(function (a, b) { return b.layers - a.layers; });
+  const SETS = [];
+  let vol3dTex = null;
+  const volMap = {};
   [0, 3].forEach(function (shell) {                            // 0: whole stacks. 3: only the pixels within 3 of the surface
     const atlas = new Art.Atlas(2048), stacks = {}, chars = {};
-    DEFS.forEach(function (d) { stacks[d.name] = Art.buildStack(d, pal, atlas, shell); });
-    Object.keys(Characters).forEach(function (c) { chars[c] = {}; Characters[c].parts.forEach(function (d) { chars[c][d.name] = Art.buildStack(d, pal, atlas, shell); }); });
+    const volAtlas = shell === 0 ? new Art.VolAtlas3D(256, 256, 256) : null;
+    DEFS_SORTED.forEach(function (d) {
+      const st = Art.buildStack(d, pal, atlas, shell, volAtlas);
+      if (volAtlas && st.vol) volMap[d.name] = st.vol;
+      else if (volMap[d.name]) st.vol = volMap[d.name];
+      stacks[d.name] = st;
+    });
+    Object.keys(Characters).forEach(function (c) {
+      chars[c] = {};
+      Characters[c].parts.forEach(function (d) {
+        const st = Art.buildStack(d, pal, atlas, shell, volAtlas);
+        if (volAtlas && st.vol) volMap['char_' + c + '_' + d.name] = st.vol;
+        else if (volMap['char_' + c + '_' + d.name]) st.vol = volMap['char_' + c + '_' + d.name];
+        chars[c][d.name] = st;
+      });
+    });
+    if (volAtlas) vol3dTex = E.makeVolume3D(volAtlas.data, volAtlas.W, volAtlas.H, volAtlas.zCur);
     SETS.push({ stacks: stacks, chars: chars, atlas: E.makeAtlas(atlas.data, atlas.size), pixels: atlas.used });
   });
   E.setPalette(pal.bytes());
@@ -135,7 +156,8 @@
   const TOURING = Q.has('tour'), HELD = Q.has('hold'), FOLLOW = num('follow', -1);
   // tod: the time of day, 0 afternoon to 1 dusk; -1 lets it drift by itself (the live page does; a held page stays put)
   const S = { hsr: num('hsr', 1) === 1, heat: num('heat', 0), res: num('res', 1), shell: num('shell', 1) === 1, fill: num('fill', 1) === 1, guard: num('guard', 1) === 1,
-    voxel: num('voxel', -1), unclamped: Q.has('unclamped'), impostors: num('impostors', 0) === 1, lod: num('lod', 0) === 1, shadows: num('shadows', 1) === 1, ao: num('ao', 1) === 1, bloom: num('bloom', 1) === 1, tod: num('tod', HELD || TOURING ? 0.25 : -1), measure: num('measure', 0) === 1, orbit: !HELD && !TOURING && !Q.has('yaw') };
+    voxel: num('voxel', -1), unclamped: Q.has('unclamped'), impostors: num('impostors', 0) === 1, lod: num('lod', 0) === 1, shadows: num('shadows', 1) === 1, ao: num('ao', 1) === 1, bloom: num('bloom', 1) === 1, tod: num('tod', HELD || TOURING ? 0.25 : -1), measure: num('measure', 0) === 1, orbit: !HELD && !TOURING && !Q.has('yaw'),
+    obb3d: num('obb3d', 1) === 1, aa: num('aa', 1) === 1, split: num('split', 0) === 1, splitX: num('splitx', 0.5), spitfire: num('spitfire', 1) === 1, spitCam: num('spitcam', 0) === 1 };
   let list = [], sprites = [], sheet = null, blobs = [], lamps = [], frame = 0, env = Scene.light(0), autoScale = 1;
 
   // ---------------------------------------------------------------- voxel mode: when
@@ -150,10 +172,10 @@
   function tiltLimit() { return cam.mode === 'persp' ? cam.fov / 2 + VOXEL_MARGIN : VOXEL_TILT; }      // perspective: the highest ray on screen must still come down, with a little to spare
   function needVoxel() { return cam.pitch < tiltLimit() || rowsSeen > VOXEL_ROWS; }
   function clampCam() {
-    // without voxel mode: in perspective every view ray must still point downward (height order is depth order only then)
-    const lowest = S.voxel !== 0 || S.unclamped ? 0.03 : cam.mode === 'persp' ? cam.fov / 2 + 0.06 : 0.1;
+    // without voxel mode or AASpriteStacker 3D OBB: in perspective every view ray must still point downward
+    const lowest = S.obb3d || S.voxel !== 0 || S.unclamped ? 0.03 : cam.mode === 'persp' ? cam.fov / 2 + 0.06 : 0.1;
     cam.pitch = Math.max(lowest, Math.min(Math.PI / 2 - 0.001, cam.pitch)); cam.dist = Math.max(16, Math.min(1100, cam.dist));
-    voxel = S.voxel === 1 || (S.voxel < 0 && needVoxel());
+    voxel = !S.obb3d && (S.voxel === 1 || (S.voxel < 0 && needVoxel()));
   }
   // The film: six shots with cuts between them, 22 seconds. Two in the parallel view, turning over the whole map:
   // first the picture, then the same picture as a heat map of fragments written (whole stacks, shell stacks,
@@ -220,6 +242,8 @@
       else if (d.kind === 'dismantle') { active = FX.dismantle > 0; if (active) layers = Math.round(Math.min(st.n, st.n - 1 - (FX.dismantle - 0.4) / 0.6 * (st.n - d.arg))); }
       else { const k = FX.lowered[d.i] || 0; active = k > 0.001; if (active) layers = Math.round(st.n - k * (st.n - d.arg)); }
       statics[0][d.i].each = statics[1][d.i].each = active ? d.each : null;
+      // Lowering walls clips Z cleanly inside Single-OBB 3D shader with zero extra boxes!
+      statics[0][d.i].zClip = statics[1][d.i].zClip = (d.kind === 'lower' && active) ? layers : undefined;
       if (layers !== d.layers) HM.stamp(d, layers, true);
     });
   }
@@ -260,17 +284,60 @@
         push('bird' + w, x, y, z, a + (fi ? -1 : 1) * Math.PI / 2 + 0.25, 1.15); if (blobs.length < 22) blobs.push([x, y, z + 2, 3.5, z - 1]);
       }
     });
+    // 6-DOF Allied Spitfire Mk.IX flying banked figure-8 patrol over Normandy (full quaternion roll + pitch!)
+    if (S.spitfire && window.Spitfire && set.stacks.spitfire) {
+      const sp = Spitfire.poseAt(t);
+      list.push({ stack: set.stacks.spitfire, x: sp.x, y: sp.y, z: sp.z, rot: sp.yaw, quat: sp.quat, scale: 0.72, only: -1, only6dof: true });
+      // Cast dynamic moving shadow onto the Normandy village & rooftops below!
+      blobs.push([sp.x, sp.y, sp.z + 6, 15.0, sp.z - 6]);
+    }
     // the light of the fire (always), and the lamps as dusk falls: [x, y, z, reach, r, g, b]
     const fl = 0.8 + 0.14 * Math.sin(t * 13) + 0.1 * Math.sin(t * 31 + 2), fk = (0.55 + 1.2 * env.glow) * fl;
     lamps.push([Wk.x - 6 * wc, Wk.y - 6 * ws, wz + 11, 70, 1.5 * fk, 0.72 * fk, 0.25 * fk]);
     if (env.glow > 0.02) Scene.LAMPS.forEach(function (L, i) { const k = env.glow * 1.5 * (0.94 + 0.06 * Math.sin(t * 9 + i * 2)); lamps.push([L[0], L[1], L[2], L[3], 1.0 * k, 0.72 * k, 0.4 * k]); });
   }
 
+  const splitBar = document.getElementById('splitBar');
+  const splitLabels = document.getElementById('splitLabels');
+
+  function syncToolbarUI() {
+    document.querySelectorAll('[data-engine]').forEach(function (b) {
+      const m = b.getAttribute('data-engine');
+      const active = (m === 'aastack' && S.obb3d) || (m === 'voxel' && !S.obb3d && S.voxel === 1) || (m === 'slices' && !S.obb3d && S.voxel !== 1);
+      b.setAttribute('aria-pressed', String(active));
+    });
+    const setP = function (id, on) { const el = document.getElementById(id); if (el) el.setAttribute('aria-pressed', String(!!on)); };
+    setP('btnAA', S.aa);
+    setP('btnSplit', S.split);
+    setP('btnSpitCam', S.spitCam);
+    setP('btnHeat', S.heat > 0);
+    setP('btnDusk', S.tod >= 0.75);
+    setP('btnLower', FX.on);
+    if (splitBar) {
+      splitBar.style.display = S.split && S.obb3d && !S.heat ? 'block' : 'none';
+      splitBar.style.left = (S.splitX * 100).toFixed(2) + '%';
+    }
+    if (splitLabels) {
+      splitLabels.style.display = S.split && S.obb3d && !S.heat ? 'flex' : 'none';
+    }
+  }
+
   function draw(f, measure) {
-    frame = f; simTo(f); if (TOURING) tour(f); else if (S.orbit) cam.yaw = v0.yaw + f / 60 * 0.06;
-    if (walkers[FOLLOW]) { const q = walkers[FOLLOW].path.at(walkers[FOLLOW].s); cam.tx = q[0]; cam.ty = q[1]; cam.tz = Scene.groundAt(q[0], q[1]) + 8; if (Q.has('face')) cam.yaw = q[2] + Math.PI + num('face', 0); }      // ?follow=3&face=0: keep a soldier in view, from the front
+    frame = f; simTo(f); if (TOURING) tour(f); else if (S.orbit && !S.spitCam) cam.yaw = v0.yaw + f / 60 * 0.06;
+    const t = f / 60;
+    // Spitfire 6-DOF Chase Camera (press F!) — panoramic angle looking past banking wings onto Normandy below!
+    if (S.spitCam && S.spitfire && window.Spitfire) {
+      const sp = Spitfire.poseAt(t);
+      cam.mode = 'persp';
+      cam.tx = sp.x; cam.ty = sp.y; cam.tz = sp.z - 2;
+      cam.yaw = sp.yaw + 0.45;
+      cam.pitch = 0.44;
+      cam.dist = 76;
+    } else if (walkers[FOLLOW]) {
+      const q = walkers[FOLLOW].path.at(walkers[FOLLOW].s); cam.tx = q[0]; cam.ty = q[1]; cam.tz = Scene.groundAt(q[0], q[1]) + 8; if (Q.has('face')) cam.yaw = q[2] + Math.PI + num('face', 0);
+    }
     clampCam();
-    const t = f / 60, set = SETS[S.shell ? 1 : 0], st = statics[S.shell ? 1 : 0];
+    const set = SETS[S.shell ? 1 : 0], st = statics[S.shell ? 1 : 0];
     env = Scene.light(S.tod < 0 ? 0.5 - 0.5 * Math.cos(t * TAU / 80) : S.tod); env.cloud = 0.5 * (1 - env.glow);
     list.length = 0; blobs = []; lamps = [];
     walkers.forEach(function (k) {
@@ -279,54 +346,107 @@
     });
     animate(t, set); effects(t);
     // impostors only where they hold: the parallel camera, with the depth test on, and once they are baked for this tilt
-    const baked = S.impostors && cam.mode !== 'persp' && (S.hsr || voxel) ? E.prepareImpostors(IMPOSTORS[S.shell ? 1 : 0], set.atlas, cam.pitch) : null;
+    const baked = !S.obb3d && S.impostors && cam.mode !== 'persp' && (S.hsr || voxel) ? E.prepareImpostors(IMPOSTORS[S.shell ? 1 : 0], set.atlas, cam.pitch) : null;
     sprites.length = 0; sheet = baked;
     for (let i = 0; i < st.length; i++) if (baked && st[i].sprite && !baked.full) sprites.push(st[i]); else list.push(st[i]);
-    E.render({ cam: cam, list: list, atlas: set.atlas, hsr: S.hsr, fill: S.fill, guard: S.guard, voxel: voxel, lod: S.lod, impostors: sprites, heat: S.heat, measure: measure || S.measure, scale: S.res * autoScale,
-      shadows: S.shadows, ao: S.ao, bloom: S.bloom, light: env, lamps: lamps, blobs: blobs, water: pal.names.water2, ground: G, time: t });
-    rowsSeen = E.stats.rows;                                   // how tall the tallest layer was on screen: next frame's decision
-    badge.classList.toggle('on', voxel);
+    E.render({
+      cam: cam, list: list, atlas: set.atlas, vol3d: vol3dTex,
+      obb3d: S.obb3d, aa: S.aa, split: S.split, splitX: S.splitX, splitLeftVoxel: true,
+      hsr: S.hsr, fill: S.fill, guard: S.guard, voxel: voxel, lod: S.lod, impostors: sprites,
+      heat: S.heat, measure: measure || S.measure, scale: S.res * autoScale,
+      shadows: S.shadows, ao: S.ao, bloom: S.bloom, light: env, lamps: lamps, blobs: blobs,
+      water: pal.names.water2, ground: G, time: t
+    });
+    rowsSeen = E.stats.rows;
+    badge.classList.toggle('on', voxel && !S.obb3d);
+    syncToolbarUI();
   }
 
-  // The canvas is as large as the window in device pixels; the picture inside it is kept to about two million
-  // pixels (the light pass is paid per pixel, and a 4K screen has four times that).
   function fit() { const d = window.devicePixelRatio || 1; canvas.width = Math.round(window.innerWidth * d); canvas.height = Math.round(window.innerHeight * d); autoScale = Math.max(1, Math.sqrt(canvas.width * canvas.height / 2.4e6)); }
   function showHud(ms) {
     const s = E.stats, f1 = function (v) { return v === null || v === undefined ? '-' : v.toFixed(v < 10 ? 2 : 1); }, th = function (v) { return String(v).replace(/\B(?=(\d{3})+$)/g, ','); };
     const tod = env.t < 0.3 ? 'afternoon' : env.t < 0.82 ? 'golden hour' : 'dusk';
+    const modeLine = s.obb3dActive
+      ? 'AASpriteStacker: Single-OBB 3D Volume DDA + 6-DOF Quaternions' + (s.aaActive ? ' + 4x RGSS AA' : ' (1x nearest)')
+      : voxel
+        ? 'loktar00 VOXEL MODE: 1 box per slice (1D yaw, 1x nearest)'
+        : S.hsr ? 'loktar00 FLAT SLICES: hidden-surface removal (1D yaw, 1x nearest)' : 'loktar00 FLAT SLICES: painter order';
+    const countLine = s.obb3dActive
+      ? th(s.obbInstances) + ' single-OBB models' + (s.sliceFallback ? ' + ' + th(s.sliceFallback) + ' limb/FX slices' : '') + (S.split && s.origInstances ? '   vs   ' + th(s.origInstances) + ' orig boxes' : '')
+      : th(s.slices) + ' slices, ' + th(s.instances) + (voxel ? ' per-slice boxes' : ' flat quads');
     statsEl.textContent = [
-      s.iw + ' x ' + s.ih + (s.iw !== canvas.width ? ' (shown at ' + canvas.width + ' x ' + canvas.height + ')' : '') + '   ' + (cam.mode === 'persp' ? 'perspective' : 'parallel') + ' camera, tilt ' + Math.round(cam.pitch * 180 / Math.PI) + '°   ' + tod,
-      (voxel ? 'VOXEL MODE: a box per slice, depth test' : S.hsr ? 'hidden-surface removal: top first, depth test' : 'painter order: bottom first, no depth test') + '   ' + (S.shell ? 'shell' : 'whole') + ' stacks' + (voxel ? '' : (S.fill ? '' : '   fill off') + (S.guard ? '' : '   guard off')),
-      'voxel mode ' + (voxel ? 'on' : 'off') + (S.voxel === 1 ? ' (forced on)' : S.voxel === 0 ? ' (forced off)' : voxel ? (rowsSeen > VOXEL_ROWS ? ' (a layer is ' + Math.round(rowsSeen) + ' rows tall, over ' + VOXEL_ROWS + ')' : ' (the view is under ' + Math.round(tiltLimit() * 180 / Math.PI) + '\u00b0)') : ' (flat slices hold above ' + Math.round(tiltLimit() * 180 / Math.PI) + '\u00b0)') + '   V changes it',
-      th(s.slices) + ' slices, ' + th(s.instances) + (voxel ? ' boxes' : ' quads') + (sprites.length ? ' (' + sprites.length + ' of them impostors)' : ''),
-      'faster ways:  V voxel mode (each slice a box with sides) ' + (voxel ? 'on' : 'off') + '   2 impostors ' + (!S.impostors ? 'off' : sprites.length ? 'on, ' + Math.round(sheet.bytes / 1048576) + ' MB' : cam.mode === 'persp' ? 'on (parallel camera only)' : !(S.hsr || voxel) ? 'on (need the depth test)' : 'on (baking)') + '   3 skip thin layers ' + (S.lod ? 'on' : 'off'),
-      s.written ? 'fragments per pixel: ' + f1(s.written.avg) + ' written (' + Math.round(s.written.max) + ' max), ' + f1(s.covered.avg) + ' covered (' + Math.round(s.covered.max) + ' max)' : 'fragments per pixel: press M to measure',
-      'slice effects:  Z build   X dismantle   C lower walls near the view ' + (FX.on ? 'on' : 'off'),
-      'frame ' + f1(ms) + ' ms' + (s.gpuMs !== null ? '   gpu ' + f1(s.gpuMs) + ' ms' : '') + '   build ' + f1(s.cpuMs) + ' ms' + (S.measure || S.heat ? '   (with the count pass)' : '')
-    ].concat(S.heat ? ['heat map, fragments ' + (S.heat === 1 ? 'written' : 'covered') + ':  black 0  blue 1  green 4  yellow 16  red 64  white 256'] : []).join('\n');
+      s.iw + ' x ' + s.ih + ' (canvas ' + canvas.width + ' x ' + canvas.height + ')   ' + (cam.mode === 'persp' ? 'perspective' : 'parallel') + ' tilt ' + Math.round(cam.pitch * 180 / Math.PI) + '°   ' + tod,
+      modeLine,
+      countLine,
+      s.written ? 'overdraw: ' + f1(s.written.avg) + ' written (' + Math.round(s.written.max) + ' max), ' + f1(s.covered.avg) + ' covered (' + Math.round(s.covered.max) + ' max)' : 'overdraw: press M to measure exact fragments/pixel',
+      '6-DOF Spitfire: ' + (S.spitfire ? (S.spitCam ? 'Chase Cam ON (F)' : 'Patrolling Normandy (F chases)') : 'off') + '   A/B Split (E): ' + (S.split ? Math.round(S.splitX * 100) + '%' : 'off'),
+      'slice FX: Z build   X dismantle   C lower walls ' + (FX.on ? 'ON' : 'off') + '   |   frame ' + f1(ms) + ' ms' + (s.gpuMs !== null ? '  gpu ' + f1(s.gpuMs) + ' ms' : '')
+    ].concat(S.heat ? ['heat map (' + (S.heat === 1 ? 'written' : 'covered') + '): black 0  blue 1  green 4  yellow 16  red 64  white 256'] : []).join('\n');
   }
 
-  // ---------------------------------------------------------------- input
-  let drag = null;
+  // ---------------------------------------------------------------- input + interactive A/B split handle + toolbar
+  let drag = null, draggingSplit = false;
   canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
-  canvas.addEventListener('mousedown', function (e) { drag = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey }; if (S.orbit) { S.orbit = false; v0.yaw = cam.yaw; } });
-  window.addEventListener('mouseup', function () { drag = null; });
+  canvas.addEventListener('mousedown', function (e) {
+    if (S.split && S.obb3d && Math.abs(e.clientX / window.innerWidth - S.splitX) < 0.025) { draggingSplit = true; return; }
+    drag = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey };
+    if (S.orbit) { S.orbit = false; v0.yaw = cam.yaw; }
+    if (S.spitCam) { S.spitCam = false; }
+  });
+  if (splitBar) {
+    splitBar.addEventListener('mousedown', function (e) { draggingSplit = true; e.stopPropagation(); e.preventDefault(); });
+  }
+  window.addEventListener('mouseup', function () { drag = null; draggingSplit = false; });
   window.addEventListener('mousemove', function (e) {
+    if (draggingSplit) { S.splitX = Math.max(0.05, Math.min(0.95, e.clientX / Math.max(1, window.innerWidth))); return; }
     if (!drag) return; const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.x = e.clientX; drag.y = e.clientY;
     if (drag.pan) { const k = cam.dist / 500, c = Math.cos(cam.yaw), s = Math.sin(cam.yaw); cam.tx += (-dx * s - dy * c / Math.max(0.3, Math.sin(cam.pitch))) * k * -1; cam.ty += (dx * c - dy * s / Math.max(0.3, Math.sin(cam.pitch))) * k; }
     else { cam.yaw -= dx * 0.006; cam.pitch += dy * 0.005; }
   });
   canvas.addEventListener('wheel', function (e) { cam.dist *= Math.exp(e.deltaY * 0.001); e.preventDefault(); }, { passive: false });
+
+  function setEngineMode(m) {
+    if (m === 'aastack') { S.obb3d = true; S.aa = true; }
+    else if (m === 'voxel') { S.obb3d = false; S.aa = false; S.split = false; S.voxel = 1; }
+    else if (m === 'slices') { S.obb3d = false; S.aa = false; S.split = false; S.voxel = 0; }
+    syncToolbarUI();
+  }
+  document.querySelectorAll('[data-engine]').forEach(function (b) {
+    b.addEventListener('click', function () { setEngineMode(b.getAttribute('data-engine')); });
+  });
+  document.querySelectorAll('[data-view]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      const vn = b.getAttribute('data-view');
+      S.spitCam = false; S.orbit = false;
+      cam.tz = 0; Object.assign(cam, VIEWS[vn]);
+      v0.yaw = cam.yaw;
+    });
+  });
+  const bindClick = function (id, fn) { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+  bindClick('btnAA', function () { S.aa = !S.aa; syncToolbarUI(); });
+  bindClick('btnSplit', function () { if (!S.obb3d) { S.obb3d = true; S.aa = true; } S.split = !S.split; syncToolbarUI(); });
+  bindClick('btnSpitCam', function () { S.spitCam = !S.spitCam; if (!S.spitCam) { cam.tz = 0; Object.assign(cam, VIEWS.street); } syncToolbarUI(); });
+  bindClick('btnHeat', function () { S.heat = (S.heat + 1) % 3; S.measure = S.heat > 0; syncToolbarUI(); });
+  bindClick('btnDusk', function () { S.tod = S.tod >= 0.75 ? 0.15 : 0.92; syncToolbarUI(); });
+  bindClick('btnBuild', function () { FX.tb = frame / 60; S.spitCam = false; cam.tz = 0; Object.assign(cam, VIEWS.build); });
+  bindClick('btnDismantle', function () { FX.td = frame / 60; S.spitCam = false; cam.tz = 0; Object.assign(cam, VIEWS.dismantle); });
+  bindClick('btnLower', function () { FX.on = !FX.on; if (FX.on) { S.spitCam = false; cam.tz = 0; Object.assign(cam, VIEWS.lower); } syncToolbarUI(); });
+
   window.addEventListener('keydown', function (e) {
     const k = e.key.toLowerCase();
-    if (k === 'p') cam.mode = cam.mode === 'persp' ? 'ortho' : 'persp'; else if (k === 'h') S.hsr = !S.hsr; else if (k === 'o') S.heat = (S.heat + 1) % 3;
+    if (k === 'k') { S.obb3d = !S.obb3d; S.aa = S.obb3d; if (!S.obb3d) S.split = false; }
+    else if (k === 'e') { if (!S.obb3d) { S.obb3d = true; S.aa = true; } S.split = !S.split; }
+    else if (k === 'f') { S.spitCam = !S.spitCam; if (!S.spitCam) { cam.tz = 0; Object.assign(cam, VIEWS.street); } }
+    else if (k === 'q') { S.aa = !S.aa; }
+    else if (k === 'p') cam.mode = cam.mode === 'persp' ? 'ortho' : 'persp'; else if (k === 'h') S.hsr = !S.hsr; else if (k === 'o') S.heat = (S.heat + 1) % 3;
     else if (k === 'r') { S.res = S.res % 3 + 1; resByHand = true; } else if (k === 'l') S.shell = !S.shell; else if (k === 't') S.fill = !S.fill; else if (k === 'g') S.guard = !S.guard;
     else if (k === 's') S.shadows = !S.shadows; else if (k === 'a') S.ao = !S.ao; else if (k === 'b') S.bloom = !S.bloom; else if (k === 'm') S.measure = !S.measure;
     else if (k === 'n') S.tod = S.tod < 0 ? 0 : S.tod < 0.3 ? 0.55 : S.tod < 0.8 ? 1 : -1;
     else if (k === ' ') { S.orbit = !S.orbit; v0.yaw = cam.yaw - frame / 60 * 0.06; e.preventDefault(); }
-    else if (k === 'v' || k === '1') S.voxel = S.voxel < 0 ? 1 : S.voxel === 1 ? 0 : -1; else if (k === '2') S.impostors = !S.impostors; else if (k === '3') S.lod = !S.lod;
+    else if (k === 'v' || k === '1') { S.obb3d = false; S.split = false; S.voxel = S.voxel < 0 ? 1 : S.voxel === 1 ? 0 : -1; } else if (k === '2') S.impostors = !S.impostors; else if (k === '3') S.lod = !S.lod;
     else if (k === 'z') FX.tb = frame / 60; else if (k === 'x') FX.td = frame / 60; else if (k === 'c') FX.on = !FX.on;
     else if (k === 'u') hud.classList.toggle('off');
+    syncToolbarUI();
   });
   window.addEventListener('resize', fit);
   // If the browser takes the graphics context away (a driver reset, too many pages), say so instead of going blank.
@@ -347,7 +467,10 @@
     frames: Q.has('fx') ? 240 : TOUR, fps: 60, engine: E, cam: cam, state: S, views: VIEWS, scene: Scene,
     ready: Promise.resolve({ frames: Q.has('fx') ? 240 : TOUR, fps: 60 }),
     seek: function (f) { playing = false; fit(); draw(f); draw(f); showHud(E.stats.cpuMs); return f; },      // twice: the choice of voxel mode follows the frame before
-    set: function (o) { Object.keys(o).forEach(function (k) { if (k in S) S[k] = o[k]; else if (k === 'view') { cam.tz = 0; Object.assign(cam, VIEWS[o[k]]); } else cam[k] = o[k]; }); },
+    set: function (o) {
+      E.stats.written = null; E.stats.covered = null;
+      Object.keys(o).forEach(function (k) { if (k in S) S[k] = o[k]; else if (k === 'view') { cam.tz = 0; Object.assign(cam, VIEWS[o[k]]); } else cam[k] = o[k]; });
+    },
     // one frame with the count pass: fragments per pixel, exactly
     measure: function (f) { playing = false; fit(); draw(f || 0); draw(f || 0, true); showHud(E.stats.cpuMs); const s = E.stats; return { canvas: [canvas.width, canvas.height], internal: [s.iw, s.ih], voxel: voxel, rows: s.rows, slices: s.slices, quads: s.instances, written: s.written, covered: s.covered, pixelsHit: s.pixelsHit / s.pixels, exact: s.exact, renderer: E.renderer }; },
     // How far flat slices fail in the current view: draw it as boxes (which are solid from anywhere), then as flat

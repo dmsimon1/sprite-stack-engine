@@ -113,9 +113,10 @@
 
   // A stack ready to draw: for each kept layer its place in the atlas and its offset from the stack's axis.
   // Slices are put in the atlas tallest first within a stack only by chance; the packing is plain rows.
-  function buildStack(def, pal, atlas, shell) {
+  function buildStack(def, pal, atlas, shell, volAtlas) {
     const v = voxelise(def, pal, shell), pad = def.pad || 0;
-    const st = { name: def.name, def: def, shell: shell, w: def.w, h: def.h, n: def.layers, pad: pad, slices: [], runs: [], radius: Math.hypot(def.w, def.h) / 2, vox: v.vox, flat: def.layers === 1 };
+    const st = { name: def.name, def: def, shell: shell, w: def.w, h: def.h, n: def.layers, pad: pad, slices: [], runs: [], radius: Math.hypot(def.w, def.h) / 2, vox: v.vox, flat: def.layers === 1, vol: null };
+    if (volAtlas) st.vol = volAtlas.putStack(def.w, def.h, def.layers, v.layers);
     // two layers are the same when they are cropped alike and every pixel (material and normal) matches
     const same = function (A, B) {
       if (A.x0 !== B.x0 || A.y0 !== B.y0 || A.w !== B.w || A.h !== B.h) return false;
@@ -148,5 +149,79 @@
     return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
   }
 
-  global.Art = { Palette: Palette, Atlas: Atlas, buildStack: buildStack, hash: hash, noise: noise };
+  // 3D Volume Atlas (AASpriteStacker Single-OBB TEXTURE_3D packer):
+  // Packs every full 3D voxel model (material + smooth normal RGBA8) into a single WebGL2 3D texture
+  // using 3D Z-slabs + 2D shelf rows so all ~800 Normandy stacks render in 1 single instanced OBB draw call.
+  function VolAtlas3D(W, H, D) {
+    this.W = W; this.H = H; this.D = D;
+    this.data = new Uint8Array(W * H * D * 4);
+    this.slabs = []; // each slab: { z0, depth, x, y, rowH }
+    this.zCur = 0;
+    this.usedVox = 0;
+  }
+  VolAtlas3D.prototype.putStack = function (w, h, n, layers) {
+    // Compute tight non-empty 3D bounding box
+    let x0 = w, y0 = h, z0 = n, x1 = -1, y1 = -1, z1 = -1;
+    for (let z = 0; z < n; z++) {
+      const L = layers[z]; if (!L) continue;
+      if (z < z0) z0 = z; if (z > z1) z1 = z;
+      if (L.x0 < x0) x0 = L.x0; if (L.x0 + L.w - 1 > x1) x1 = L.x0 + L.w - 1;
+      if (L.y0 < y0) y0 = L.y0; if (L.y0 + L.h - 1 > y1) y1 = L.y0 + L.h - 1;
+    }
+    if (x1 < 0) return null;
+    const bw = x1 - x0 + 1, bh = y1 - y0 + 1, bn = z1 - z0 + 1;
+    // Find an existing Z-slab tall enough (within ~2x) with XY room, or allocate a new Z-slab
+    let chosen = null;
+    for (let i = 0; i < this.slabs.length; i++) {
+      const sl = this.slabs[i];
+      if (bn > sl.depth) continue;
+      if (sl.depth > bn * 2.5 && this.zCur + bn + 1 <= this.D) continue;
+      if (sl.x + bw + 1 <= this.W && sl.y + bh + 1 <= this.H) { chosen = sl; break; }
+      if (sl.y + sl.rowH + 1 + bh + 1 <= this.H && bw + 2 <= this.W) {
+        sl.x = 1; sl.y += sl.rowH + 1; sl.rowH = 0; chosen = sl; break;
+      }
+    }
+    if (!chosen) {
+      // Fall back to any slab with height >= bn if zCur exhausted
+      if (this.zCur + bn + 1 > this.D) {
+        for (let i = 0; i < this.slabs.length; i++) {
+          const sl = this.slabs[i];
+          if (bn > sl.depth) continue;
+          if (sl.x + bw + 1 <= this.W && sl.y + bh + 1 <= this.H) { chosen = sl; break; }
+          if (sl.y + sl.rowH + 1 + bh + 1 <= this.H && bw + 2 <= this.W) {
+            sl.x = 1; sl.y += sl.rowH + 1; sl.rowH = 0; chosen = sl; break;
+          }
+        }
+      }
+      if (!chosen) {
+        if (this.zCur + bn > this.D) throw new Error('VolAtlas3D full at z=' + this.zCur + ' need ' + bn);
+        chosen = { z0: this.zCur, depth: bn, x: 1, y: 1, rowH: 0 };
+        this.slabs.push(chosen);
+        this.zCur += bn + 1;
+      }
+    }
+    const ox = chosen.x, oy = chosen.y, oz = chosen.z0;
+    chosen.x += bw + 1;
+    if (bh > chosen.rowH) chosen.rowH = bh;
+    const W = this.W, WH = this.W * this.H;
+    for (let z = 0; z < bn; z++) {
+      const L = layers[z0 + z]; if (!L) continue;
+      const dstZ = (oz + z) * WH;
+      for (let y = 0; y < bh; y++) {
+        const srcOff = ((y0 + y) * w + x0) * 4;
+        const dstOff = (dstZ + (oy + y) * W + ox) * 4;
+        this.data.set(L.px.subarray(srcOff, srcOff + bw * 4), dstOff);
+      }
+    }
+    this.usedVox += bw * bh * bn;
+    return {
+      ox: ox, oy: oy, oz: oz,
+      bw: bw, bh: bh, bn: bn,
+      // Center offset relative to stack's original axis (w/2, h/2, 0)
+      cx: x0 - w / 2, cy: y0 - h / 2, cz: z0,
+      fullN: n
+    };
+  };
+
+  global.Art = { Palette: Palette, Atlas: Atlas, VolAtlas3D: VolAtlas3D, buildStack: buildStack, hash: hash, noise: noise };
 })(typeof window !== 'undefined' ? window : globalThis);

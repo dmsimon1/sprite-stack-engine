@@ -1,3 +1,36 @@
+## Fork Extension: AASpriteStacker Single-OBB 3D Volume DDA + 4x RGSS AA + 6-DOF
+
+> Built directly on top of [@loktar00/sprite-stack-engine](https://github.com/loktar00/sprite-stack-engine) (MIT License, Copyright (c) 2026 loktar00). All Normandy 1944 procedural village geometry, deferred 48-step soft shadows, SSAO, dusk point lamps, slice effects, and exact additive overdraw measurement come from `@loktar00`'s original engine.
+
+This fork adds three rendering experiments from [AASpriteStacker](https://github.com/dmsimon1/AASpriteStacker) (`https://aasprite.com/normandy/`) right alongside `@loktar00`'s original flat-slice and per-slice voxel modes, measured through the exact same `RGBA16F` overdraw counter:
+
+1. **Single-OBB `TEXTURE_3D` Volume DDA (`K` key):** Packs all 284 Normandy models into one `256x256x222` `TEXTURE_3D` (`55.5 MB`) and draws **1 tight back-face-culled OBB per whole stack** (with exact inverse linear wind shear and per-instance Z-clip for `C` wall lowering), writing the exact same G-buffer so `@loktar00`'s `FS_LIGHT` deferred pass works unchanged.
+2. **Zero-Palette-Bleed `4x` RGSS Sub-Pixel AA (`Q` key) + Live Draggable A/B Split (`E` key):** Shades the supersampled G-buffer before resolving with a 4-tap rotated grid kernel in linear RGB (avoiding palette-index interpolation artifacts), eliminating diagonal edge shimmer during camera turns and tilts.
+3. **Full 6-DOF Quaternion Rotation (`F` key):** Adds a banking WW2 Allied Spitfire Mk.IX (with D-Day invasion stripes and a dynamic village shadow) pitching and rolling up to `48 deg` over Normandy.
+
+![Live A/B Split: loktar00 1x Nearest vs AASpriteStacker 1-OBB 3D + 4x RGSS AA](media/aastack-split-ab.png)
+
+![Full 6-DOF Banking D-Day Spitfire Over Normandy](media/aastack-spitfire-6dof.png)
+
+### Measured Apples-to-Apples (`1280x760`, Apple Silicon Metal WebGL2)
+
+| View | Renderer | Internal Res | Instances | Written Avg | Covered Avg | ms / frame |
+| :--- | :--- | :--- | ---: | ---: | ---: | ---: |
+| Overview | `loktar00` Flat Slices (HSR) | `1280x760` | `16,421` | `0.70` | `15.12` | `2.04 ms` |
+| Overview | `loktar00` Per-Slice Voxel (1x) | `1280x760` | `8,537` | `0.70` | `8.06` | `2.14 ms` |
+| Overview | **AASpriteStacker 1-OBB 3D (1x)** | `1280x760` | **`1,957`** | `0.76` | **`2.03`** | **`1.59 ms`** |
+| Overview | **AASpriteStacker 1-OBB 3D + 4x RGSS AA** | `2560x1520` | **`1,957`** | `0.76` | **`2.03`** | **`3.67 ms`** |
+| Street | `loktar00` Flat Slices (HSR) | `1280x760` | `44,136` | `1.01` | `101.83` | `1.96 ms` |
+| Street | `loktar00` Per-Slice Voxel (1x) | `1280x760` | `5,326` | `0.99` | `9.33` | `1.37 ms` |
+| Street | **AASpriteStacker 1-OBB 3D (1x)** | `1280x760` | **`1,293`** | `1.12` | **`3.80`** | `1.58 ms` |
+| Street | **AASpriteStacker 1-OBB 3D + 4x RGSS AA** | `2560x1520` | **`1,293`** | `1.11` | **`3.80`** | **`3.98 ms`** |
+| Tilt 8 deg | `loktar00` Flat Slices (HSR) | `1280x760` | `53,166` | `1.12` | `119.98` | `2.08 ms` |
+| Tilt 8 deg | `loktar00` Per-Slice Voxel (1x) | `1280x760` | `5,310` | `1.51` | `7.37` | `1.41 ms` |
+| Tilt 8 deg | **AASpriteStacker 1-OBB 3D (1x)** | `1280x760` | **`1,316`** | **`1.06`** | **`4.61`** | `1.73 ms` |
+| Tilt 8 deg | **AASpriteStacker 1-OBB 3D + 4x RGSS AA** | `2560x1520` | **`1,316`** | **`1.06`** | **`4.61`** | **`4.45 ms`** |
+
+---
+
 # Sprite stack engine
 
 ![A village in Normandy, 1944, built from slice stacks: a turn over the whole map, the overdraw heat map, then down to the bridge and the square, a cottage built slice by slice, a barn roof blown off, a farmhouse's walls lowered, and the burning wreck at dusk](media/tour.gif)
