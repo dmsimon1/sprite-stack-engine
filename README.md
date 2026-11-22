@@ -1,6 +1,6 @@
 # Sprite stack engine
 
-![A village in Normandy, 1944, built from slice stacks: a turn over the whole map, the overdraw heat map, then down to the bridge, the square and the burning wreck as the afternoon turns to dusk](media/tour.gif)
+![A village in Normandy, 1944, built from slice stacks: a turn over the whole map, the overdraw heat map, then down to the bridge and the square, a cottage built slice by slice, a barn roof blown off, a farmhouse's walls lowered, and the burning wreck at dusk](media/tour.gif)
 
 A small sprite-stacking renderer in plain WebGL2, with no libraries. Everything on screen is a stack of flat
 slices, drawn as textured quads. The camera turns, tilts and zooms freely, in a parallel or a perspective
@@ -16,9 +16,13 @@ It exists to test two claims about sprite stacking with numbers instead of opini
   slice is drawn once per screen row its layer covers. Press **T** to see both. That holds down to a measured
   tilt; below it the engine changes to [voxel mode](#voxel-mode), says so on screen, and stacks stay solid all
   the way to the horizon.
-- *"Overdraw is around 99x at 1080p."* Drawn naively it is worse than that: this scene reaches **104 fragments
+- *"Overdraw is around 99x at 1080p."* Drawn naively it is worse than that: this scene reaches **103 fragments
   per pixel** at street level. Drawn front to back with a depth test it is **1.09**. Press **O** for the heat
   map and **H** to switch.
+
+And one more thing, which matters more than either: [it's about the look](#its-about-the-look), not about the
+slices. The art is the constant and the renderer is a choice: there are faster ways to draw the same stacks
+(**1**, **2**, **3**), and there are things only slices do (**Z**, **X**, **C**).
 
 The demo scene is a village in hedgerow country in the summer of 1944, lit by a low sun that sinks to dusk.
 The lighting is one pass over the screen and is written to be read: every effect has a comment in
@@ -31,7 +35,9 @@ Open `index.html` in a browser with WebGL2. It runs from the file system; there 
 | Drag | turn and tilt |
 | Shift-drag, right-drag | pan |
 | Wheel | zoom |
-| V | voxel mode: by itself (the default), always, never |
+| 1 or V | voxel mode (slabs: each slice drawn as a box with sides): by itself (the default), always, never |
+| 2, 3 | more faster ways to draw: impostors, skip thin layers |
+| Z, X, C | slice effects: build, dismantle, lower the walls near the view |
 | P | parallel / perspective camera |
 | H | hidden-surface removal / painter order |
 | O | overdraw heat map: fragments written, fragments covered, off |
@@ -57,22 +63,22 @@ blit, each frame waited for, averaged over 200 frames.
 
 | view | resolution | order | quads | written avg | written max | covered avg | covered max | ms/frame |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| overview | native 1920x1080 | painter, whole stacks | 24875 | 14.35 | 139 | 22.3 | 274 | 1.35 |
-| overview | native 1920x1080 | painter, shell stacks | 24574 | 8.84 | 115 | 21.0 | 272 | 1.30 |
-| overview | native 1920x1080 | hidden-surface, whole stacks | 24875 | 0.67 | 2 | 22.3 | 274 | 1.20 |
-| overview | native 1920x1080 | hidden-surface, shell stacks | 24574 | 0.67 | 2 | 21.0 | 272 | 1.20 |
-| overview | internal 960x540 | painter, whole stacks | 16365 | 10.24 | 94 | 15.6 | 165 | 0.80 |
-| overview | internal 960x540 | painter, shell stacks | 16064 | 6.15 | 70 | 14.3 | 163 | 0.87 |
-| overview | internal 960x540 | hidden-surface, whole stacks | 16365 | 0.67 | 2 | 15.6 | 165 | 0.76 |
-| overview | internal 960x540 | hidden-surface, shell stacks | 16064 | 0.67 | 2 | 14.3 | 163 | 0.89 |
-| street | native 1920x1080 | painter, whole stacks | 59981 | 104.33 | 490 | 141.2 | 670 | 3.11 |
-| street | native 1920x1080 | painter, shell stacks | 59773 | 50.78 | 474 | 137.9 | 668 | 2.84 |
-| street | native 1920x1080 | hidden-surface, whole stacks | 59981 | 1.09 | 3 | 141.2 | 670 | 2.33 |
-| street | native 1920x1080 | hidden-surface, shell stacks | 59773 | 1.09 | 3 | 137.9 | 668 | 2.24 |
-| street | internal 960x540 | painter, whole stacks | 33442 | 54.48 | 256 | 73.6 | 339 | 1.37 |
-| street | internal 960x540 | painter, shell stacks | 33234 | 26.58 | 241 | 71.2 | 337 | 1.25 |
-| street | internal 960x540 | hidden-surface, whole stacks | 33442 | 0.98 | 3 | 73.6 | 339 | 1.61 |
-| street | internal 960x540 | hidden-surface, shell stacks | 33234 | 0.98 | 3 | 71.2 | 337 | 1.17 |
+| overview | native 1920x1080 | painter, whole stacks | 25182 | 12.92 | 127 | 22.2 | 286 | 1.27 |
+| overview | native 1920x1080 | painter, shell stacks | 24881 | 8.84 | 125 | 20.9 | 284 | 1.20 |
+| overview | native 1920x1080 | hidden-surface, whole stacks | 25182 | 0.67 | 2 | 22.2 | 286 | 1.18 |
+| overview | native 1920x1080 | hidden-surface, shell stacks | 24881 | 0.67 | 2 | 20.9 | 284 | 1.09 |
+| overview | internal 960x540 | painter, whole stacks | 16497 | 9.29 | 83 | 15.5 | 177 | 0.81 |
+| overview | internal 960x540 | painter, shell stacks | 16196 | 6.16 | 78 | 14.3 | 175 | 0.92 |
+| overview | internal 960x540 | hidden-surface, whole stacks | 16497 | 0.67 | 2 | 15.5 | 177 | 0.78 |
+| overview | internal 960x540 | hidden-surface, shell stacks | 16196 | 0.67 | 2 | 14.3 | 175 | 0.79 |
+| street | native 1920x1080 | painter, whole stacks | 60140 | 103.43 | 490 | 141.1 | 670 | 3.10 |
+| street | native 1920x1080 | painter, shell stacks | 59932 | 50.79 | 474 | 137.8 | 668 | 2.68 |
+| street | native 1920x1080 | hidden-surface, whole stacks | 60140 | 1.09 | 3 | 141.1 | 670 | 2.08 |
+| street | native 1920x1080 | hidden-surface, shell stacks | 59932 | 1.09 | 3 | 137.8 | 668 | 2.11 |
+| street | internal 960x540 | painter, whole stacks | 33568 | 54.02 | 256 | 73.6 | 339 | 1.26 |
+| street | internal 960x540 | painter, shell stacks | 33360 | 26.58 | 241 | 71.1 | 337 | 1.31 |
+| street | internal 960x540 | hidden-surface, whole stacks | 33568 | 0.98 | 3 | 73.6 | 339 | 1.42 |
+| street | internal 960x540 | hidden-surface, shell stacks | 33360 | 0.98 | 3 | 71.1 | 337 | 1.22 |
 
 - **written**: fragments that reached the G-buffer, per screen pixel (all pixels; in the overview a third of
   the screen is open ground beyond the map, which no stack covers, so its best case is 0.67 and not 1).
@@ -81,15 +87,16 @@ blit, each frame waited for, averaged over 200 frames.
 
 What the numbers say, and what they do not:
 
-- The naive figure is real. Painter order at street level writes 104 fragments per pixel on average and 490 at
+- The naive figure is real. Painter order at street level writes 103 fragments per pixel on average and 490 at
   the worst pixel.
-- Hidden-surface removal takes written fragments from 104 to 1.09 (a factor of 96). The scene looks the same.
+- Hidden-surface removal takes written fragments from 103 to 1.09 (a factor of 95). The scene looks the same.
 - It does **not** reduce what the rasteriser covers: 141 fragments per pixel still reach the depth test. A
   rejected fragment is cheap but not free, and whether the GPU runs the fragment shader for it depends on its
-  early depth test. That is why this table reports "written" and "covered" and never "shaded".
-- Shell stacks cut written fragments 1.6 to 2.0 times in painter order and change nothing once the depth test
+  early depth test. That is why this table reports "written" and "covered" and never "shaded". (Voxel mode,
+  below, is what brings covered down: from 138 to 9.)
+- Shell stacks cut written fragments 1.5 to 2.0 times in painter order and change nothing once the depth test
   is on. (Much of this scene is trees and hedges, which are mostly surface to begin with.)
-- Half resolution roughly halves the fragments per pixel at street level (104 to 54) as well as quartering the
+- Half resolution roughly halves the fragments per pixel at street level (103 to 54) as well as quartering the
   pixels, because each layer needs half as many copies.
 - On this GPU every row is far under a 60 Hz frame (16.7 ms), so these timings mostly show that the scene is
   small for the hardware. The fragment counts are the hardware-independent part. Run `tools/bench.py` on your
@@ -99,7 +106,7 @@ What the numbers say, and what they do not:
   shadow steps and takes 16 occlusion samples. That is why the overview rows sit within 0.2 ms of one another.
 - These numbers are higher than the ones this page first reported (0.46 ms for the overview and 0.83 ms at
   street level, with hidden-surface removal and shell stacks). That was a town block of 1,476 slices under
-  one flat light; this is a map of 8,600 slices with the light pass described below. The machine is shared,
+  one flat light; this is a map of 8,800 slices with the light pass described below. The machine is shared,
   and timings move by a few tenths of a millisecond from run to run.
 
 ### Without a GPU
@@ -110,37 +117,37 @@ rough: only 6 frames per row.
 
 | view | resolution | order | written avg | ms/frame |
 | --- | --- | --- | ---: | ---: |
-| overview | native 1920x1080 | painter, whole stacks | 14.35 | 721 |
-| overview | native 1920x1080 | painter, shell stacks | 8.84 | 720 |
-| overview | native 1920x1080 | hidden-surface, whole stacks | 0.67 | 733 |
-| overview | native 1920x1080 | hidden-surface, shell stacks | 0.67 | 700 |
-| overview | internal 960x540 | painter, whole stacks | 10.24 | 309 |
-| overview | internal 960x540 | painter, shell stacks | 6.15 | 303 |
-| overview | internal 960x540 | hidden-surface, whole stacks | 0.67 | 311 |
-| overview | internal 960x540 | hidden-surface, shell stacks | 0.67 | 300 |
-| street | native 1920x1080 | painter, whole stacks | 104.32 | 1872 |
-| street | native 1920x1080 | painter, shell stacks | 50.77 | 1600 |
-| street | native 1920x1080 | hidden-surface, whole stacks | 1.09 | 1468 |
-| street | native 1920x1080 | hidden-surface, shell stacks | 1.09 | 1462 |
-| street | internal 960x540 | painter, whole stacks | 54.47 | 489 |
-| street | internal 960x540 | painter, shell stacks | 26.57 | 493 |
-| street | internal 960x540 | hidden-surface, whole stacks | 0.98 | 797 |
-| street | internal 960x540 | hidden-surface, shell stacks | 0.98 | 503 |
+| overview | native 1920x1080 | painter, whole stacks | 12.92 | 668 |
+| overview | native 1920x1080 | painter, shell stacks | 8.84 | 671 |
+| overview | native 1920x1080 | hidden-surface, whole stacks | 0.67 | 617 |
+| overview | native 1920x1080 | hidden-surface, shell stacks | 0.67 | 616 |
+| overview | internal 960x540 | painter, whole stacks | 9.29 | 237 |
+| overview | internal 960x540 | painter, shell stacks | 6.16 | 253 |
+| overview | internal 960x540 | hidden-surface, whole stacks | 0.67 | 250 |
+| overview | internal 960x540 | hidden-surface, shell stacks | 0.67 | 243 |
+| street | native 1920x1080 | painter, whole stacks | 103.42 | 1385 |
+| street | native 1920x1080 | painter, shell stacks | 50.78 | 1363 |
+| street | native 1920x1080 | hidden-surface, whole stacks | 1.09 | 1259 |
+| street | native 1920x1080 | hidden-surface, shell stacks | 1.09 | 1252 |
+| street | internal 960x540 | painter, whole stacks | 54.02 | 417 |
+| street | internal 960x540 | painter, shell stacks | 26.58 | 489 |
+| street | internal 960x540 | hidden-surface, whole stacks | 0.98 | 461 |
+| street | internal 960x540 | hidden-surface, shell stacks | 0.98 | 1351 |
 
-- On a CPU the light pass is now the main cost. The overview takes about 720 ms whatever the draw order,
+- On a CPU the light pass is now the main cost. The overview takes 620 to 670 ms whatever the draw order,
   because the two million pixels each do the same shadow walk and occlusion samples; a quarter of the pixels
-  takes it to about 305 ms. **S** and **A** switch shadows and occlusion off.
-- At street level hidden-surface removal saves about a fifth at native resolution (1872 to 1468 ms). The
+  takes it to about 245 ms. **S** and **A** switch shadows and occlusion off.
+- At street level hidden-surface removal saves about a tenth at native resolution (1385 to 1259 ms). The
   rasteriser still walks every covered fragment, and covered fragments are what a CPU pays for.
 - None of these rows is real time: a software rasteriser at 1080p is the wrong tool whatever the method.
-- The machine was busy with other work during this run. One row (street, 960x540, hidden-surface, whole
-  stacks, 797 ms) is out of line with its three neighbours for that reason, so read these timings as orders
+- The machine was busy with other work during this run. One row (street, 960x540, hidden-surface, shell
+  stacks, 1351 ms) is out of line with its three neighbours for that reason, so read these timings as orders
   of magnitude.
 
 The two heat maps below are the street view at 1920x1080. (The frame times printed in these stills include the
 count pass and its read-back, so they are not the timings in the table.)
 
-![Fragments written, painter order: 104 per pixel on average](media/heat-painter.png)
+![Fragments written, painter order: 103 per pixel on average](media/heat-painter.png)
 
 ![Fragments written, hidden-surface removal: 1.09 per pixel on average](media/heat-hsr.png)
 
@@ -181,17 +188,17 @@ the pixels that show an object (`tools/bench.py --voxel`):
 | tilt | parallel camera (village) | perspective camera (street) |
 | ---: | ---: | ---: |
 | 60 | 0.38% | 0.14% |
-| 45 | 0.35% | 0.09% |
-| 30 | 0.33% | 0.11% |
+| 45 | 0.37% | 0.09% |
+| 30 | 0.32% | 0.11% |
 | 27 | 0.36% | 0.14% |
-| 24 | 0.39% | 0.24% |
-| 21 | 0.41% | 0.47% |
-| 18 | 0.38% | 1.19% |
-| 15 | 0.47% | 0.82% |
-| 12 | 0.63% | 0.49% |
-| 9 | 0.93% | 0.55% |
-| 6 | 1.98% | 0.51% |
-| 3 | 4.47% | 0.17% |
+| 24 | 0.38% | 0.24% |
+| 21 | 0.41% | 0.46% |
+| 18 | 0.37% | 1.18% |
+| 15 | 0.46% | 0.81% |
+| 12 | 0.63% | 0.50% |
+| 9 | 0.92% | 0.55% |
+| 6 | 1.97% | 0.51% |
+| 3 | 4.49% | 0.19% |
 
 Down to 18 degrees the parallel camera sits on a floor of about 0.35 percent (things one pixel wide, where a
 flat copy and a box cover different pixels). It lifts off at 15 and doubles by 9. The perspective camera
@@ -199,30 +206,33 @@ doubles between 27 and 21, on the way to the 20 degrees where its top rays turn 
 is no longer a fair measure: slices then sort in the wrong order as well, which this count does not see, and
 the picture is far worse than half a percent suggests (the first still above).
 
+![A tilt sweep at street level, 60 to 5 degrees: flat slices down to 25, voxel mode (badge top right) at 15 and 5](media/sweep.png)
+
 **The soldiers' limbs.** One part of this was a plain bug, found by looking at a soldier head-on. Arms and legs
 are single slices strung along a bone. The engine treated every one-layer stack as flat and gave it no fill at
 all, and the limb code spaced the slices up to 1.4 layers apart, so from the front a limb was a row of
 separate discs at any tilt. Limb slices now get fill like everything else and are placed less than a layer
 apart, and a soldier is solid head-on in plain sprite stacking.
 
-![A soldier head-on, flat slices (voxel mode held off with V: this close, a nearby layer is over 48 rows tall and the engine would otherwise switch)](media/soldier-normal.png)
+![A soldier head-on at 25 degrees, flat slices](media/soldier-normal.png)
 
-![The same in voxel mode](media/soldier-voxel.png)
+![And lower, at 7 degrees, in voxel mode](media/soldier-voxel.png)
 
 **The badge.** "VOXEL MODE, slices get side faces", top right, whenever it is on; it fades when the camera
-tilts back up. The read-out says why it is on. **V** forces it on, forces it off, or hands the choice back.
+tilts back up. The read-out says why it is on. **1** (or **V**) forces it on, forces it off, or hands the
+choice back.
 Forced off, the camera gets its old limits back.
 
 **What it costs.**
 
 | view | drawn as | quads or boxes | written avg | covered avg | gaps | ms/frame |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| overview, tilt 41 | flat slices | 24574 | 0.67 | 21.0 | 0.70% | 1.18 |
-| overview, tilt 41 | voxel mode | 8615 | 0.67 | 7.7 | 0 | 0.90 |
-| street, tilt 25 | flat slices | 59773 | 1.09 | 137.9 | 0.19% | 2.12 |
-| street, tilt 25 | voxel mode | 5519 | 0.99 | 9.2 | 0 | 0.84 |
-| level, tilt 8 | flat slices | 81368 | 5.10 | 167.0 | 0.62% | 2.75 |
-| level, tilt 8 | voxel mode | 5605 | 1.52 | 7.2 | 0 | 0.81 |
+| overview, tilt 41 | flat slices | 24881 | 0.67 | 20.9 | 0.70% | 1.18 |
+| overview, tilt 41 | voxel mode | 8543 | 0.67 | 7.7 | 0 | 0.89 |
+| street, tilt 25 | flat slices | 59932 | 1.09 | 137.8 | 0.18% | 2.05 |
+| street, tilt 25 | voxel mode | 5394 | 0.99 | 9.2 | 0 | 0.82 |
+| level, tilt 8 | flat slices | 81830 | 5.11 | 167.0 | 0.63% | 2.61 |
+| level, tilt 8 | voxel mode | 5500 | 1.52 | 7.2 | 0 | 0.82 |
 
 ("Gaps" is the count above. Flat slices at 8 degrees are there only for the comparison: the camera
 does not go there without voxel mode.) On this GPU voxel mode is the cheaper of the two wherever both work:
@@ -231,6 +241,99 @@ sort and a fraction of the fragments to rasterise. What it gives up is the early
 shader writes depth, and it runs a short loop per fragment (at most 48 steps), so on hardware where fragment
 work is the limit the balance may differ; that is not measured here. It stays off above the limits anyway,
 because the point of this page is what flat slices can and cannot do, and where exactly they stop.
+
+## It's about the look
+
+The point of sprite stacking is not the slices. It is the look: art authored as layers of pixels, and the
+chunky, hand-made solidity that gives a scene. Drawing every slice as its own flat quad is only the simplest
+renderer for that art, and it is the slow one. **The art is the constant; the renderer is a choice.** Three
+other choices are here as switches. And what slices are uniquely good at is something else again: every slice
+is its own thing, so an object can be built, taken apart or cut open one slice at a time.
+
+### Faster ways to draw the same art
+
+Each is a key, and each is measured alone and together against plain quads (`tools/bench.py --tricks`):
+hidden-surface removal and shell stacks on throughout, 200 frames, same GPU as above. "Far" is the whole map
+seen small, at a third of the resolution, which is where the last one has something to do.
+
+| view | drawn as | quads or boxes | written avg | covered avg | covered max | ms/frame |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| overview, 1920x1080 | flat quads (none) | 24881 | 0.67 | 20.9 | 284 | 1.18 |
+| overview, 1920x1080 | voxel mode (slabs) | 8543 | 0.67 | 7.7 | 92 | 0.91 |
+| overview, 1920x1080 | impostors | 9947 | 0.87 | 12.8 | 259 | 0.79 |
+| overview, 1920x1080 | skip thin layers | 24881 | 0.67 | 20.9 | 284 | 1.31 |
+| overview, 1920x1080 | voxel mode + impostors | 4174 | 0.88 | 5.7 | 84 | 0.66 |
+| overview, 1920x1080 | all three | 4174 | 0.88 | 5.7 | 84 | 0.70 |
+| street, 1920x1080 | flat quads (none) | 59932 | 1.09 | 137.8 | 668 | 2.27 |
+| street, 1920x1080 | voxel mode (slabs) | 5394 | 0.99 | 9.2 | 38 | 0.80 |
+| street, 1920x1080 | impostors | 59932 | 1.09 | 137.8 | 668 | 2.23 |
+| street, 1920x1080 | skip thin layers | 59932 | 1.09 | 137.8 | 668 | 2.02 |
+| street, 1920x1080 | voxel mode + impostors | 5394 | 0.99 | 9.2 | 38 | 0.81 |
+| street, 1920x1080 | all three | 5394 | 0.99 | 9.2 | 38 | 0.83 |
+| far (whole map small), internal 640x360 | flat quads (none) | 8887 | 0.12 | 1.5 | 93 | 0.57 |
+| far (whole map small), internal 640x360 | voxel mode (slabs) | 8623 | 0.12 | 1.4 | 91 | 0.59 |
+| far (whole map small), internal 640x360 | impostors | 4221 | 0.16 | 1.0 | 89 | 0.56 |
+| far (whole map small), internal 640x360 | skip thin layers | 5046 | 0.11 | 0.7 | 49 | 0.53 |
+| far (whole map small), internal 640x360 | voxel mode + impostors | 4202 | 0.16 | 1.0 | 83 | 0.43 |
+| far (whole map small), internal 640x360 | all three | 3005 | 0.14 | 0.7 | 48 | 0.44 |
+
+- **1, voxel mode (slabs: each slice drawn as a box with sides).** This is the [voxel mode](#voxel-mode)
+  above, forced on at any tilt, and it is the biggest win by a long way: at street level 59,932 quads become
+  5,394 boxes, the fragments the rasteriser covers go from 138 per pixel to 9, and the frame from 2.3 ms to
+  0.8. It should be said plainly what it is: **a voxel-style renderer for the same stack-authored art.** Not
+  one slice was redrawn for it. Layers that repeat the one under them also merge into one taller box (a
+  "run", up to three layers), but that finds little here: 45 of 2,592 layers repeat, because walls and leaves
+  are painted pixel by pixel. The costs are the ones listed under voxel mode.
+- **2, impostors** (`VS_IMP`, `prepareImpostors`). A stack that never changes and stands in many places (549
+  trees, tufts, graves and poles here) is drawn ahead of time from 32 directions into an atlas that keeps
+  what the G-buffer needs: material, facing and height. After that it is one quad, lit and shadowed like
+  everything else, and it still leans in the wind. The catches are real: the stack turns in steps of 11
+  degrees as the camera goes round; the sprites hold for one tilt of the parallel camera only (they are drawn
+  again, about four times a second at most, while the tilt changes, and the perspective camera does not use
+  them at all, which is why the street rows do not move); they are sharp at one zoom (3 pixels per unit) and
+  resampled at others; and the atlas is 4096 by 2048 twice over, 64 MB.
+- **3, skip thin layers.** When a layer is thinner than a pixel on screen, several layers land on the same
+  row; one of them is kept and the rest are left out. At 1080p nothing in this scene is that small, so the
+  overview and street rows do not move. Seen far off at low resolution it nearly halves the quads.
+
+Is the picture the same? Nearly, and not exactly. Against plain quads, counting pixels that differ by more
+than a tenth of full scale: voxel mode changes 2 to 4 percent of the screen, almost all of it along
+silhouettes and in the dither of shadow edges (which follows the exact height of each pixel); impostors
+change 3 percent of the overview, at the outlines of trees; skipping thin layers changes nothing at 1080p and
+2 percent of the far view. None of it reads as a different picture. The two heat maps show what the
+rasteriser covers at street level, with flat quads and in voxel mode.
+
+![Fragments covered at street level, flat quads: 138 per pixel](media/heat-quads.png)
+
+![The same in voxel mode: 9 per pixel](media/heat-voxel.png)
+
+### What only slices do
+
+Each of these is a small function that the engine calls once per slice of one stack (`each` on a list item;
+the three are in `js/main.js` under "slice effects"). It moves the slice, or leaves it out. The height map
+follows, so shadows and occlusion change with the object. They work in either way of drawing.
+
+**Build (Z).** Slices drop in from above, the lowest first, each turning a little as it settles: a cottage
+goes up, sandbags are laid, tents are pitched.
+
+![A cottage built slice by slice](media/fx-build.gif)
+
+**Dismantle (X).** Slices fly off the top one after another, spin, shrink and are gone: a shell takes the
+roof off the barn. (They come back the same way.)
+
+![The barn's roof blown off slice by slice](media/fx-dismantle.gif)
+
+**Lower the walls (C).** Every slice above a height is left out, and the height slides down: the walls of a
+building near the point the camera looks at sink to waist height, and the room and the men in it show. The
+farmhouse and the church have rooms. It is off until asked for.
+
+![The farmhouse's walls lowered: the command post inside](media/fx-lower.gif)
+
+![The same, still](media/lowered.png)
+
+The honest limits: a slice that flies is still flat, so a dismantled roof is a spray of flat plates, not
+rubble; shell stacks are hollow, which shows as frames while a building goes up; and nothing here fades,
+because the G-buffer holds one opaque surface per pixel (slices shrink instead).
 
 ## The techniques
 
@@ -347,7 +450,8 @@ of poplars. A tank and a sandbag post watch the bridge; there are a half-track, 
 jerrycans, barbed wire, telegraph poles, craters, and a burnt-out lorry that is still burning. The vehicles
 are generic shapes and carry no markings.
 
-What moves: eight soldiers on four patrol routes (**?follow=3&face=0** in the address keeps one in view, from the front), the tank's turret, a jeep that runs the road with dust
+What moves: ten soldiers on six routes, two of them indoors in the farmhouse and the church
+(**?follow=3&face=0** in the address keeps one in view, from the front), the tank's turret, a jeep that runs the road with dust
 behind it, flames and smoke, two flocks of birds, trees, grass and wheat in the wind, cloud shadows, the
 stream.
 
@@ -358,7 +462,7 @@ tall, so the stream lies under the fields, craters are dug into it, and hedges a
 it. The soldiers and their walk are built on the rig from
 [sprite-stack-animation](https://github.com/loktar00/sprite-stack-animation) (`js/rig.js`, `js/characters.js`).
 
-About 800 placed stacks (270 different ones, the ground tiles and wheat patches among them); 8,600 slices
+About 800 placed stacks (270 different ones, the ground tiles and wheat patches among them); 8,800 slices
 on screen in the overview; 16,000 to 60,000 quads a frame depending on camera and resolution. The page builds
 all of it, twice (whole and shell), in about a second.
 
@@ -367,14 +471,14 @@ all of it, twice (whole and shell), in about a second.
 | Path | What |
 | --- | --- |
 | `index.html` | the demo page |
-| `js/engine.js` | the renderer: instances, slice pass (flat slices or voxel mode), count pass, light pass, bloom |
+| `js/engine.js` | the renderer: instances, slice pass (flat slices or voxel mode), impostors, count pass, light pass, bloom |
 | `js/art.js` | stacks from functions: voxels, normals, shell, atlas |
 | `js/models.js` | the objects: buildings, trees, vehicles, field works, smoke |
 | `js/scene.js` | the land, the layout, the routes, the palette, the light by time of day |
 | `js/characters.js`, `js/rig.js` | the soldier and his walk |
-| `js/main.js` | what moves, camera, input, read-out, capture hooks |
-| `tools/bench.py` | the tables above (`--voxel` for voxel mode and the tilt sweep) |
-| `tools/capture.py`, `tools/encode.sh` | frames, MP4 and GIF of the camera tour |
+| `js/main.js` | what moves, the slice effects, camera, input, read-out, capture hooks |
+| `tools/bench.py` | the tables above (`--voxel` for voxel mode and the tilt sweep, `--tricks` for the faster ways) |
+| `tools/capture.py`, `tools/encode.sh` | frames, MP4 and GIF of the camera tour, and a GIF of each slice effect |
 | `skills/sprite-stack-engine/SKILL.md` | the techniques written up as an agent skill |
 
 ## Reproducing the numbers
@@ -385,7 +489,8 @@ Needs Python with Playwright (`pip install playwright`, `playwright install chro
 python tools/bench.py                 # GPU
 python tools/bench.py --software      # CPU rasteriser
 python tools/bench.py --voxel         # voxel mode: its cost, and where flat slices open gaps
-sh tools/encode.sh                    # out/tour.mp4 and out/tour.gif (needs ffmpeg)
+python tools/bench.py --tricks        # voxel mode, impostors, skipping thin layers
+sh tools/encode.sh                    # out/tour.mp4, out/tour.gif and out/fx-*.gif (needs ffmpeg)
 ```
 
 In the page, `demo.measure()` returns the counts for the current view, `demo.bench(n)` the milliseconds per

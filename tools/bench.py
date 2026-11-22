@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """bench.py: measure the demo and print a table. Also saves a still of each configuration.
 
-    python tools/bench.py [--out out/bench] [--frames 120] [--software] [--voxel]
+    python tools/bench.py [--out out/bench] [--frames 120] [--software] [--voxel] [--tricks]
 
 Needs Playwright (pip install playwright; playwright install chromium). The page runs at 1920x1080 in headless
 Chromium. For each configuration it asks the page for:
@@ -10,6 +10,8 @@ Chromium. For each configuration it asks the page for:
 --software forces the CPU rasteriser (SwiftShader), where fill cost is not hidden by a fast GPU.
 --voxel measures voxel mode instead: what it costs beside flat slices where both hold (street), and what each
 shows where flat slices do not (level: nearly along the ground), then how many gaps flat slices open, tilt by tilt.
+--tricks measures the faster ways to draw (voxel mode, impostors, skipping thin layers): each alone and all
+together, against plain quads, with hidden-surface removal and shell stacks on throughout.
 """
 import argparse, asyncio, json, os, pathlib
 from playwright.async_api import async_playwright
@@ -17,6 +19,9 @@ from playwright.async_api import async_playwright
 VIEWS = ['overview', 'street']
 RES = [(1, 'native 1920x1080'), (2, 'internal 960x540')]
 ORDERS = [(0, 0, 'painter, whole stacks'), (0, 1, 'painter, shell stacks'), (1, 0, 'hidden-surface, whole stacks'), (1, 1, 'hidden-surface, shell stacks')]
+# the faster ways: (voxel mode, impostors, skip thin layers, name), and where: (view, internal resolution divisor, name)
+TRICKS = [(0, 0, 0, 'flat quads (none)'), (1, 0, 0, 'voxel mode (slabs)'), (0, 1, 0, 'impostors'), (0, 0, 1, 'skip thin layers'), (1, 1, 0, 'voxel mode + impostors'), (1, 1, 1, 'all three')]
+PLACES = [('overview', 1, 'overview, 1920x1080'), ('street', 1, 'street, 1920x1080'), ('far', 3, 'far (whole map small), internal 640x360')]
 
 
 async def main():
@@ -25,6 +30,7 @@ async def main():
     ap.add_argument('--frames', type=int, default=120)
     ap.add_argument('--software', action='store_true')
     ap.add_argument('--voxel', action='store_true')
+    ap.add_argument('--tricks', action='store_true')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     url = (pathlib.Path(__file__).resolve().parent.parent / 'index.html').as_uri() + '?hold'
@@ -42,6 +48,23 @@ async def main():
         except Exception:
             print('the page did not start; errors:', errors[:5])
             raise SystemExit(1)
+        if a.tricks:
+            rows = []
+            for view, res, place in PLACES:
+                for vox, imp, lod, name in TRICKS:
+                    await page.evaluate('(c) => demo.set(c)', {'view': view, 'res': res, 'hsr': True, 'shell': True, 'heat': 0, 'measure': False, 'voxel': vox, 'impostors': bool(imp), 'lod': bool(lod)})
+                    await page.evaluate('demo.seek(0)'); await page.wait_for_timeout(300)      # impostors are baked on the first frame
+                    m = await page.evaluate('demo.measure(0)')
+                    ms = await page.evaluate('(n) => demo.bench(n)', a.frames)
+                    rows.append(dict(place=place, name=name, ms=ms, **m))
+                    await page.evaluate('demo.seek(0)'); await page.screenshot(path=os.path.join(a.out, 'tricks-%s-%d%d%d.png' % (view, vox, imp, lod)))
+            await browser.close()
+            print('renderer:', rows[0]['renderer'], '| errors:', errors[:5])
+            print('| view | drawn as | quads or boxes | written avg | covered avg | covered max | ms/frame |')
+            print('| --- | --- | ---: | ---: | ---: | ---: | ---: |')
+            for r in rows:
+                print('| %s | %s | %d | %.2f | %.1f | %d | %.2f |' % (r['place'], r['name'], r['quads'], r['written']['avg'], r['covered']['avg'], r['covered']['max'], r['ms']))
+            return
         if a.voxel:
             print('renderer:', await page.evaluate('demo.engine.renderer'))
             print('| view | drawn as | quads or boxes | written avg | covered avg | gaps | ms/frame |')

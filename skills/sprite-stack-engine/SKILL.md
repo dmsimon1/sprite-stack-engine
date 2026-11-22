@@ -71,6 +71,27 @@ Measure first (see below). Then, in order of payoff:
 6. **Internal resolution.** Rendering at half size quarters the pixels and also halves the copies needed per
    layer, so the fill drops by about eight.
 
+## The art is the constant; the renderer is a choice
+
+Flat quads per slice are the simplest renderer for stack-authored art, not the only one.
+
+- **Voxel mode as a speed switch.** The box drawing above is also the fastest way to draw the stacks at any
+  tilt: no fill copies, and the rasteriser covers each slice once (here 138 covered fragments per pixel
+  became 9, and the frame 2.3 ms became 0.8). Say plainly that it is a voxel-style renderer for the same art.
+  Merge layers that repeat into one taller box. Cost: `gl_FragDepth` gives up the early depth test.
+- **Impostors.** For a stack that never changes and is placed many times, render it ahead of time from N
+  directions into an atlas holding the G-buffer's channels (material, normal, height), then draw one
+  camera-facing quad and rebuild depth from the stored height. Catches: rotation in steps, one tilt of a
+  parallel camera per bake, one sharp zoom, and the atlas's memory.
+- **Skip thin layers.** When a layer is under a pixel tall on screen, keep one layer in every few.
+
+## Slice effects
+
+Give a list item a function called once per slice that moves the slice or leaves it out. Three uses:
+build (slices drop in, lowest first), dismantle (slices fly off the top, spin and shrink), and cutting a
+building open (leave out every slice above a sliding height, so the room inside shows). Patch the height map
+as the object changes so shadows and occlusion follow. Nothing can fade: the G-buffer is opaque, so shrink.
+
 ## Measuring overdraw (never estimate it)
 
 Draw the same instances again into a float target with additive blending, adding 1 per fragment, then read it

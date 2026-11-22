@@ -22,7 +22,8 @@
   // ---------------------------------------------------------------- buildings
   // A house: W along x, D along y, the ridge along x, the front on the +y side. o.wall(face, a, z, end) paints the
   // walls: face 0 front (+y), 1 back, 2 the +x gable end, 3 the -x end; a runs along the wall, end is the distance
-  // to the nearer corner. o.roof(x, y, r) paints the roof, r layers above the eaves.
+  // to the nearer corner. o.roof(x, y, r) paints the roof, r layers above the eaves. o.room(x, y, z), if given,
+  // furnishes the inside (the house is then hollow, and lowering its walls shows the room: see main.js).
   function house(o) {
     const hw = o.W / 2, hd = o.D / 2, body = o.wallH, rh = o.roofH, ov = o.eave || 2, chim = o.chimneys || [];
     return { name: o.name, w: o.W + ov * 2 + 2, h: o.D + ov * 2 + 4, layers: body + rh + 8, fn: function (x, y, z) {
@@ -32,7 +33,7 @@
       if (z < body) {
         if (ax > hw || ay > hd) return null;
         const onX = ax > hw - 1, onY = ay > hd - 1;
-        if (!onX && !onY) return 'inside';
+        if (!onX && !onY) return !o.room ? 'inside' : ax > hw - 2 || ay > hd - 2 ? 'plaster2' : o.room(x, y, z);
         return onY ? o.wall(y > 0 ? 0 : 1, x, z, hw - ax) : o.wall(x > 0 ? 2 : 3, y, z, hd - ay);
       }
       if (r >= rh) return null;
@@ -61,7 +62,20 @@
       if (end < 2 && (floor(z / 3) & 1)) return 'quoin';                                         // corner stones
       return stone(a, z, 7 + f);
     },
-    extra: function (x, y, z) { return abs(x + 1) < 0.9 && abs(y - 17.6) < 0.9 && z >= 15 && z <= 18 ? (z === 15 || z === 18 ? 'iron' : 'lamp') : null; }   // the lantern by the door
+    extra: function (x, y, z) { return abs(x + 1) < 0.9 && abs(y - 17.6) < 0.9 && z >= 15 && z <= 18 ? (z === 15 || z === 18 ? 'iron' : 'lamp') : null; },   // the lantern by the door
+    // the ground floor, taken over as a command post: a map table and a lamp, a hearth, bunks, stores
+    room: function (x, y, z) {
+      const ay = abs(y);
+      if (z === 0) return abs(x - 24) < 9 && ay < 5 ? (abs(x - 24) > 7.5 || ay > 3.5 ? 'rug2' : 'rug') : floor(x + 60) % 4 === 0 ? 'floorB2' : 'floorB';
+      if (z === 19) return 'floorB2';                                                                       // the floor of the storey above
+      if (z > 19) return null;
+      if (abs(x - 10.5) < 1 && !(ay < 3.5 && z < 13)) return 'plaster';                                     // a partition, with a doorway
+      if (x < -37 && ay < 4.5) return z < 9 ? (ay < 2.5 && z < 5 ? (z < 2 ? 'ember' : null) : stone(y, z, 91)) : null;      // the hearth, embers in it
+      if (abs(x + 20) < 6 && ay < 3.5) return z === 6 ? (abs(x + 20) < 3 && ay < 2 ? 'frame' : 'timber') : z < 6 ? (abs(abs(x + 20) - 5) < 0.8 && abs(ay - 2.6) < 0.8 ? 'timberD' : null) : z < 9 && hypot(x + 16, y - 1.5) < 0.9 ? (z === 7 ? 'iron' : 'lamp') : null;   // the table: a map, a lamp
+      if ((abs(x + 28.5) < 1.2 || abs(x + 11.5) < 1.2) && ay < 1.5 && z < 4) return 'timberD';             // two chairs
+      if (x > 20 && x < 36 && y < -9) return z < 2 ? 'timberD' : z < 4 ? (x > 32 ? 'frame' : floor(x + 60) % 8 < 4 ? 'canvas' : 'packS') : null;      // bunks along the back wall
+      return x > 29 && x < 37 && y > 7 && y < 14 && z < (x > 33 ? 8 : 5) ? (z === 4 || z === 7 ? 'crateD' : 'crate') : null;                         // stores
+    }
   });
 
   // The barn: stone below, boards above, a shell hole through the roof and a breach in one corner. Where the
@@ -109,7 +123,12 @@
     if (x > -31 && x <= 31) {                                                         // the nave
       if (z < 36) {
         if (ay > 14) { const b = abs(((x + 31 + 700) % 14) - 7); return b > 5.6 && ay < 17.5 - Math.max(0, z - 22) * 0.25 && z < 31 ? (z > 21 && ay > 16 - (z - 22) * 0.25 ? 'quoin' : stone(x + y, z, 33)) : null; }   // buttresses
-        if (ay <= 13) return 'inside';
+        if (ay <= 13) {                                                                 // inside the nave: a flagged floor, a carpet up the aisle, pews, an altar
+          if (ay > 12 || x < -29.5) return 'plaster2';
+          if (z === 0) return ay < 2 ? 'rug' : hash(floor(x / 3), floor(y / 3), 47) < 0.5 ? 'cobble3' : 'cobble';
+          if (x > 22 && x < 28 && ay < 4.5) return z < 6 ? (z === 5 ? 'frame' : 'quoin') : z < 9 && abs(ay - 3) < 0.7 && abs(x - 25) < 0.7 ? (z === 8 ? 'lamp' : 'gold') : null;
+          const pw = ((x + 26 + 700) % 7); return x > -25 && x < 16 && ay > 3.5 && ay < 11 && z < (pw < 1 ? 6 : pw < 3.4 ? 3 : 0) ? (z === 2 || z === 5 ? 'timber' : 'timberD') : null;
+        }
         const m = ((x + 31 + 700) % 14) - 7, am = abs(m);
         if (z > 11 && z < 30 - am * am * 0.5 && am < 2.6) return am > 1.7 || z > 28 - am * am * 0.5 || z === 12 ? 'quoin' : (hash(floor((x + 31) / 14), 2, y > 0 ? 1 : 2) < 0.7 ? 'glassC' : 'glass');
         return z < 2 ? 'limeD' : z >= 34 ? 'quoin' : stone(x, z, 35);

@@ -23,6 +23,7 @@
   const NB = 2048, ZQ = 16;           // height buckets, and buckets per unit of height
   const HMAX = 128;                   // tallest thing the G-buffer and the height map can hold
   const LAMPS = 8, BLOBS = 24, STEPS = 48, REACH = 195;
+  const ANGLES = 32, IMP_W = 4096, IMP_H = 2048, IMP_PPU = 3, IL = 15;      // impostors: views per stack, their atlas, its pixels per unit, floats per sprite
 
   // ---------------------------------------------------------------- small matrix helpers (column-major 4x4)
   function mul(a, b) { const o = new Float32Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3]; return o; }
@@ -177,6 +178,57 @@
     o = vec4(u_unit, 0.0, 0.0, 0.0);
   }`;
   // ================================================================ end of voxel mode's shaders
+  // Impostors. A stack that never changes can be drawn ahead of time: once from each of ${ANGLES} directions round
+  // it, into an atlas that keeps what the G-buffer needs (material, facing, height). After that the whole stack is
+  // one quad that faces the camera, showing the view nearest to the real one. The catches are real: the stack
+  // turns in steps of ${360 / ANGLES} degrees, the sprites hold for one tilt of the parallel camera only (they are
+  // drawn again when the tilt changes), they are sharp at one zoom, and the atlas costs memory.
+  const VS_IMP = `#version 300 es
+  layout(location=0) in vec4 a_pos;      // x, y, z, scale
+  layout(location=1) in vec4 a_cell;     // this view's rectangle in the impostor atlas
+  layout(location=2) in vec4 a_how;      // the turn its normals need, lean x, lean y, the stack's height
+  layout(location=3) in vec3 a_size;     // the sprite's width and height in world units, and how far under the base it starts
+  layout(location=5) in vec2 a_corner;
+  uniform mat4 u_vp; uniform vec3 u_right, u_up;
+  out vec2 v_uv; out vec3 v_w; flat out vec4 v_cell, v_pos; flat out float v_rot;
+  void main() {
+    vec3 w = a_pos.xyz + (u_right * ((a_corner.x - 0.5) * a_size.x) + u_up * (a_corner.y * a_size.y - a_size.z)) * a_pos.w
+           + vec3(a_how.yz, 0.0) * (a_corner.y * a_how.w * a_pos.w);                 // the top leans with the wind
+    gl_Position = u_vp * vec4(w, 1.0); v_uv = a_corner * a_cell.zw; v_w = w; v_cell = a_cell; v_pos = a_pos; v_rot = a_how.x;
+  }`;
+  const IMP_FS = `
+  uniform sampler2D u_i0, u_i1; uniform mat4 u_vp; uniform vec3 u_fwd;
+  in vec2 v_uv; in vec3 v_w; flat in vec4 v_cell, v_pos; flat in float v_rot;
+  // the sprite's pixel, the height it stood at when it was drawn, and from that its true depth
+  bool sprite(out vec4 a, out float h) {
+    ivec2 tc = ivec2(v_cell.xy) + ivec2(clamp(v_uv, vec2(0.0), v_cell.zw - 0.001));
+    a = texelFetch(u_i0, tc, 0); if (a.r == 0.0) return false;
+    vec4 b = texelFetch(u_i1, tc, 0);
+    h = v_pos.z + (b.r * 65280.0 + b.g * 255.0) / 65535.0 * ${HMAX}.0 * v_pos.w;
+    vec4 c = u_vp * vec4(v_w + u_fwd * ((v_w.z - h) / -u_fwd.z), 1.0);
+    gl_FragDepth = c.z / c.w * 0.5 + 0.5; return true;
+  }`;
+  const FS_GIMP = `#version 300 es
+  precision highp float;
+  ${IMP_FS}
+  layout(location=0) out vec4 o0; layout(location=1) out vec4 o1;
+  void main() {
+    vec4 a; float hw; if (!sprite(a, hw)) discard;
+    float c = cos(v_rot), s = sin(v_rot); vec3 n = a.gba * 2.0 - 1.0; n.xy = vec2(n.x * c - n.y * s, n.x * s + n.y * c);
+    o0 = vec4(a.r, n * 0.5 + 0.5);
+    float h = clamp(hw / ${HMAX}.0, 0.0, 1.0) * 65535.0, hi = floor(h / 256.0);
+    o1 = vec4(hi / 255.0, (h - hi * 256.0) / 255.0, 0.0, 1.0);
+  }`;
+  const FS_COUNTIMP = `#version 300 es
+  precision highp float;
+  ${IMP_FS}
+  uniform int u_all; uniform float u_unit;
+  out vec4 o;
+  void main() {
+    if (u_all == 1) { o = vec4(0.0, u_unit, 0.0, 0.0); gl_FragDepth = gl_FragCoord.z; return; }
+    vec4 a; float hw; if (!sprite(a, hw)) discard;
+    o = vec4(u_unit, 0.0, 0.0, 0.0);
+  }`;
   const VS_FULL = `#version 300 es
   layout(location=5) in vec2 a_corner;
   out vec2 v_uv;
@@ -404,6 +456,7 @@
     }
     const pG = program(VS_SLICE, FS_G), pCount = program(VS_SLICE, FS_COUNT), pLight = program(VS_FULL, FS_LIGHT), pHeat = program(VS_FULL, FS_HEAT);
     const pGVoxel = program(VS_VOXEL, FS_GVOXEL), pCountVoxel = program(VS_VOXEL, FS_COUNTVOXEL);
+    const pGImp = program(VS_IMP, FS_GIMP), pCountImp = program(VS_IMP, FS_COUNTIMP);
     const pBright = program(VS_FULL, FS_BRIGHT), pBlur = program(VS_FULL, FS_BLUR), pPost = program(VS_FULL, FS_POST);
 
     // the four corners of a quad (one small buffer, shared), the instance buffer, and their vertex arrays
@@ -421,6 +474,9 @@
       0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1,   0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1,   1, 1, 0, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1,
       1, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1,   0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1,   0, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0]), gl.STATIC_DRAW);
     gl.enableVertexAttribArray(5); gl.vertexAttribPointer(5, 3, gl.FLOAT, false, 0, 0);
+    const impBuf = gl.createBuffer(), vaoImp = gl.createVertexArray(); gl.bindVertexArray(vaoImp); gl.bindBuffer(gl.ARRAY_BUFFER, impBuf);
+    [[0, 4, 0], [1, 4, 4], [2, 4, 8], [3, 3, 12]].forEach(function (a) { gl.enableVertexAttribArray(a[0]); gl.vertexAttribPointer(a[0], a[1], gl.FLOAT, false, IL * 4, a[2] * 4); gl.vertexAttribDivisor(a[0], 1); });
+    gl.bindBuffer(gl.ARRAY_BUFFER, corners); gl.enableVertexAttribArray(5); gl.vertexAttribPointer(5, 2, gl.FLOAT, false, 0, 0);
     const vaoFull = gl.createVertexArray(); gl.bindVertexArray(vaoFull); gl.bindBuffer(gl.ARRAY_BUFFER, corners); gl.enableVertexAttribArray(5); gl.vertexAttribPointer(5, 2, gl.FLOAT, false, 0, 0);
 
     // render targets, made again when the internal resolution changes
@@ -448,9 +504,13 @@
     // the height map for shadows and occlusion: one byte per ground cell, the height of the tallest thing standing
     // on it (in half units). It is read with smoothing, which is what rounds the shadows' edges.
     E.setHeightMap = function (bytes, w, h) { hmTex = texture(w, h, gl.R8, gl.RED, gl.UNSIGNED_BYTE, bytes, gl.LINEAR); world = [w, h]; };
+    // a part of it again, when something on the map changes height (a wall lowered, a roof blown off)
+    E.patchHeightMap = function (bytes, x, y, w, h) { gl.bindTexture(gl.TEXTURE_2D, hmTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, w, h, gl.RED, gl.UNSIGNED_BYTE, bytes); };
 
     // Turn slices into sorted instances. list: [{ stack, x, y, z, rot, scale, only (one slice index, or -1 for all),
-    // shx, shy (optional: how far the stack leans per unit of height, for trees and wheat in the wind) }]
+    // shx, shy (optional: how far the stack leans per unit of height, for trees and wheat in the wind),
+    // each (optional: function (layer, layers, out) -> out or null, moves or hides single slices: the slice effects) }]
+    const moved = { dx: 0, dy: 0, dz: 0, rot: 0, scale: 1 };
     function build(list, M, opt) {
       const ppuOrtho = ih / (2 * opt.cam.dist * M.th), vp = M.vp, voxel = !!opt.voxel;
       let n = 0, slices = 0, tallest = 0;
@@ -460,14 +520,14 @@
       for (let q = 0; q < list.length; q++) {
         const it = list[q], st = it.stack, sc = it.scale, one = it.only >= 0;
         // Leave out what the camera cannot see: a sphere round the stack against the edges of the view.
-        const zc = one ? it.z : it.z + st.n * sc * 0.5, R = (one ? st.radius : Math.hypot(st.radius, st.n * 0.5)) * sc + 2;
+        const zc = one ? it.z : it.z + st.n * sc * 0.5, R = (one ? st.radius : Math.hypot(st.radius, st.n * 0.5)) * sc + (it.each ? 60 : 2);
         const cw = vp[3] * it.x + vp[7] * it.y + vp[11] * zc + vp[15], cx = vp[0] * it.x + vp[4] * it.y + vp[8] * zc + vp[12], cy = vp[1] * it.x + vp[5] * it.y + vp[9] * zc + vp[13];
         if (!M.ortho && cw < -R) continue;                     // behind the camera
         if ((M.ortho || cw > R) && (Math.abs(cx) - R * M.px > cw || Math.abs(cy) - R * M.py > cw)) continue;
         const sides = one || st.slices.length > 1 || st.slices[0].sides;
         // how many screen rows one layer of this stack is tall: that many copies of each slice
         let rows = 1;
-        if (opt.fill) {
+        if (opt.fill || opt.lod || voxel) {
           if (M.ortho) rows = ppuOrtho * M.cp * sc;
           else {
             // the nearest this stack can be: its middle less its radius, but no nearer than where the lowest ray on
@@ -477,24 +537,32 @@
           }
         }
         if (rows > tallest && sides && Math.abs(cx) < cw && Math.abs(cy) < cw) tallest = rows;      // the tallest layer on screen (of stacks whose middle is in view and that have sides to fill)
-        const copies = voxel ? 1 : Math.max(st.shell ? Math.ceil(1 / (st.shell * slope)) : 1, Math.min(48, Math.ceil(rows)));
-        const a = one ? it.only : 0, b = one ? it.only + 1 : st.slices.length, shx = it.shx || 0, shy = it.shy || 0;
+        // Level of detail: when a layer is thinner than a pixel on screen, several layers land on one row.
+        // Keep one of every `skip` (counting down from the top, which is always kept) and leave the rest out.
+        const skip = opt.lod && !one && !it.each && rows < 1 ? Math.floor(1 / rows) : 1;
+        const copies = voxel ? 1 : Math.max(st.shell ? Math.ceil(1 / (st.shell * slope)) : 1, Math.min(48, Math.ceil(opt.fill ? rows : 1)));
+        // voxel mode draws runs (layers that repeat merged into one taller box) unless an effect moves single slices
+        const src = voxel && !one && !it.each ? st.runs : st.slices;
+        const a = one ? it.only : 0, b = one ? it.only + 1 : src.length, shx = it.shx || 0, shy = it.shy || 0;
         // (a layer with no side, flat ground, needs no fill: it is drawn once, at the top of its layer)
         if (n + (b - a) * copies > cap) { while (n + (b - a) * copies > cap) cap *= 2; const i2 = new Float32Array(cap * FL), t2 = new Float32Array(cap * FL), k2 = new Uint16Array(cap); t2.set(tmp); k2.set(keys); inst = i2; tmp = t2; keys = k2; }
         for (let s = a; s < b; s++) {
-          const sl = st.slices[s], z0 = it.z + (one ? 0 : sl.z * sc), first = sl.sides ? 0 : copies - 1; slices++;
+          if (skip > 1 && (b - 1 - s) % skip) continue;
+          const sl = src[s], first = sl.sides ? 0 : copies - 1; let x0 = it.x, y0 = it.y, z0 = it.z + (one ? 0 : sl.z * sc), rot = it.rot, k1 = sc;
+          if (it.each) { const m = it.each(sl.z, st.n, moved); if (!m) continue; x0 += m.dx; y0 += m.dy; z0 += m.dz; rot += m.rot; k1 *= m.scale; }
+          slices++;
           if (voxel) {
-            // VOXEL MODE: one box per slice, a layer tall (paper thin, at the top of its layer, for ground with no side)
-            const j = n * FL, up = z0 - it.z, thin = !sl.sides;
-            tmp[j] = it.x + shx * up; tmp[j + 1] = it.y + shy * up; tmp[j + 2] = z0 + (thin ? 0.97 * sc : 0); tmp[j + 3] = it.rot;
-            tmp[j + 4] = sl.u; tmp[j + 5] = sl.v; tmp[j + 6] = sl.w; tmp[j + 7] = sl.h; tmp[j + 8] = sl.ox; tmp[j + 9] = sl.oy; tmp[j + 10] = sc; tmp[j + 11] = (thin ? 0.03 : 1) * sc;
+            // VOXEL MODE: one box per slice or run, as tall as the layers it stands for (paper thin, at the top of its layer, for ground with no side)
+            const j = n * FL, up = z0 - it.z, thin = !sl.sides, tall = thin ? 0.03 : s === b - 1 ? sl.n : Math.max(sl.n, skip);
+            tmp[j] = x0 + shx * up; tmp[j + 1] = y0 + shy * up; tmp[j + 2] = z0 + (thin ? (sl.n - 0.03) * k1 : 0); tmp[j + 3] = rot;
+            tmp[j + 4] = sl.u; tmp[j + 5] = sl.v; tmp[j + 6] = sl.w; tmp[j + 7] = sl.h; tmp[j + 8] = sl.ox; tmp[j + 9] = sl.oy; tmp[j + 10] = k1; tmp[j + 11] = tall * k1;
             keys[n++] = NB - 1 - Math.min(NB - 1, Math.max(0, Math.floor(z0 * ZQ)));      // highest first; the depth test does the rest
             continue;
           }
           for (let k = first; k < copies; k++) {
-            const z = z0 + k / copies * sc, j = n * FL, up = z - it.z;
-            tmp[j] = it.x + shx * up; tmp[j + 1] = it.y + shy * up; tmp[j + 2] = z; tmp[j + 3] = it.rot;
-            tmp[j + 4] = sl.u; tmp[j + 5] = sl.v; tmp[j + 6] = sl.w; tmp[j + 7] = sl.h; tmp[j + 8] = sl.ox; tmp[j + 9] = sl.oy; tmp[j + 10] = sc; tmp[j + 11] = 0;
+            const z = z0 + k / copies * k1, j = n * FL, up = z - it.z;
+            tmp[j] = x0 + shx * up; tmp[j + 1] = y0 + shy * up; tmp[j + 2] = z; tmp[j + 3] = rot;
+            tmp[j + 4] = sl.u; tmp[j + 5] = sl.v; tmp[j + 6] = sl.w; tmp[j + 7] = sl.h; tmp[j + 8] = sl.ox; tmp[j + 9] = sl.oy; tmp[j + 10] = k1; tmp[j + 11] = 0;
             let key = Math.min(NB - 1, Math.max(0, Math.floor(z * ZQ))); if (opt.hsr) key = NB - 1 - key;      // painter: lowest first; hidden-surface removal: highest first
             keys[n++] = key;
           }
@@ -518,7 +586,62 @@
     }
     function pass(fbo, w, h, prog, tex) { gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, w, h); gl.useProgram(prog.p); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(prog.u.u_tex, 0); }
 
-    // opt: { cam, list, atlas, hsr, fill, guard, voxel (draw boxes instead of flat quads), heat (0 off, 1 written, 2 covered), measure, scale (canvas pixels per
+    // Draw every stack in `stacks` from ${ANGLES} directions into the impostor atlas, for this tilt. Returns the
+    // table of sprites, or null when it is not ready: the bake is redone when the tilt or the art changes, but
+    // not more than four times a second (while the camera is being tilted the real stacks are drawn instead).
+    let imp = null, impTex = null, impFbo = null;
+    E.prepareImpostors = function (stacks, atlas, pitch) {
+      if (imp && imp.atlas === atlas && imp.count === stacks.length && Math.abs(imp.pitch - pitch) < 0.01) return imp;
+      const now = performance.now(); if (imp && now - imp.time < 250) return null;
+      if (!impTex) {
+        impTex = [texture(IMP_W, IMP_H, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE), texture(IMP_W, IMP_H, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE)];
+        const d = gl.createRenderbuffer(); gl.bindRenderbuffer(gl.RENDERBUFFER, d); gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, IMP_W, IMP_H);
+        impFbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, impFbo);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, impTex[0], 0); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, impTex[1], 0);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, d); gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+      }
+      const cp = Math.cos(pitch), sp = Math.sin(pitch), th = Math.tan(0.35), cells = new Map(), t0 = now;
+      let x = 0, y = 0, rowH = 0;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, impFbo); gl.disable(gl.BLEND); gl.enable(gl.SCISSOR_TEST); gl.clearColor(0, 0, 0, 0); gl.clearDepth(1); gl.depthMask(true);
+      for (let q = 0; q < stacks.length; q++) {
+        const st = stacks[q], r = st.radius + 1, Ww = 2 * r, Hw = st.n * cp + 2 * r * sp, w = Math.ceil(Ww * IMP_PPU), h = Math.ceil(Hw * IMP_PPU), at = [];
+        for (let k = 0; k < ANGLES; k++) {
+          if (x + w > IMP_W) { x = 0; y += rowH; rowH = 0; }
+          if (y + h > IMP_H) { gl.disable(gl.SCISSOR_TEST); return (imp = { atlas: atlas, count: stacks.length, pitch: pitch, time: now, full: true, cells: new Map() }); }     // no room: draw real stacks
+          const cam = { mode: 'ortho', tx: 0, ty: 0, yaw: k * Math.PI * 2 / ANGLES, pitch: pitch, dist: Hw / 2 / th, fov: 0.7 }, M = cameraMatrices(cam, w / h);
+          M.vp[13] += -1 + 2 * r * sp / Hw;                     // put the stack's foot where the sprite expects it
+          const opt = { cam: cam, voxel: true, hsr: true, fill: true, atlas: atlas }, n = build([{ stack: st, x: 0, y: 0, z: 0, rot: 0, scale: 1, only: -1 }], M, opt);
+          gl.viewport(x, y, w, h); gl.scissor(x, y, w, h); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+          gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, inst.subarray(0, n * FL), gl.DYNAMIC_DRAW);
+          drawSlices(pGVoxel, n, M, opt, true);
+          at.push(x, y); x += w; if (h > rowH) rowH = h;
+        }
+        cells.set(st, { w: w, h: h, Ww: Ww, Hw: Hw, foot: r * sp, at: at });
+      }
+      gl.disable(gl.SCISSOR_TEST);
+      return (imp = { atlas: atlas, count: stacks.length, pitch: pitch, time: now, cells: cells, ms: performance.now() - t0, bytes: IMP_W * IMP_H * 8, used: (y + rowH) / IMP_H });
+    };
+    let impData = new Float32Array(1024 * IL);
+    function drawImpostors(prog, items, M, opt, depth) {
+      const n = items.length; if (impData.length < n * IL) impData = new Float32Array(n * IL * 2);
+      let m = 0;
+      for (let i = 0; i < n; i++) {
+        const it = items[i], c = imp.cells.get(it.stack); if (!c) continue;
+        const step = Math.PI * 2 / ANGLES, k = ((Math.round((opt.cam.yaw - it.rot) / step) % ANGLES) + ANGLES) % ANGLES, j = m++ * IL;
+        impData[j] = it.x; impData[j + 1] = it.y; impData[j + 2] = it.z; impData[j + 3] = it.scale;
+        impData[j + 4] = c.at[k * 2]; impData[j + 5] = c.at[k * 2 + 1]; impData[j + 6] = c.w; impData[j + 7] = c.h;
+        impData[j + 8] = opt.cam.yaw - k * step; impData[j + 9] = it.shx || 0; impData[j + 10] = it.shy || 0; impData[j + 11] = it.stack.n;
+        impData[j + 12] = c.Ww; impData[j + 13] = c.Hw; impData[j + 14] = c.foot;
+      }
+      gl.useProgram(prog.p); gl.bindVertexArray(vaoImp); gl.bindBuffer(gl.ARRAY_BUFFER, impBuf); gl.bufferData(gl.ARRAY_BUFFER, impData.subarray(0, m * IL), gl.DYNAMIC_DRAW);
+      gl.uniformMatrix4fv(prog.u.u_vp, false, M.vp); gl.uniform3fv(prog.u.u_right, M.r); gl.uniform3fv(prog.u.u_up, M.u); gl.uniform3fv(prog.u.u_fwd, M.f);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, impTex[0]); gl.uniform1i(prog.u.u_i0, 0); gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, impTex[1]); gl.uniform1i(prog.u.u_i1, 1);
+      if (depth) { gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(true); } else gl.disable(gl.DEPTH_TEST);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, m); gl.disable(gl.DEPTH_TEST); gl.activeTexture(gl.TEXTURE0);
+      return m;
+    }
+
+    // opt: { cam, list, atlas, hsr, fill, guard, voxel (draw boxes instead of flat quads), lod (skip layers thinner than a pixel), impostors (items drawn as sprites: needs the depth test and the parallel camera), heat (0 off, 1 written, 2 covered), measure, scale (canvas pixels per
     //        internal pixel), shadows, ao, bloom, water (palette index), time (seconds),
     //        light { sun, sunCol, skyCol, bounceCol, hazeCol, hazeK, glow, exposure, outer, cloud },
     //        lamps [[x, y, z, reach, r, g, b]], blobs [[x, y, top, radius, bottom]] }
@@ -533,14 +656,18 @@
       // the slice pass: G-buffer only
       gl.bindFramebuffer(gl.FRAMEBUFFER, fboG); gl.clearColor(0, 0, 0, 0); gl.clearDepth(1); gl.depthMask(true); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
       const pg = opt.voxel ? pGVoxel : pG, pc = opt.voxel ? pCountVoxel : pCount, tested = opt.hsr || !!opt.voxel;      // voxel mode always tests depth
+      const sprites = opt.impostors && opt.impostors.length ? opt.impostors : null;
       drawSlices(pg, n, M, opt, tested);
+      if (sprites) E.stats.instances += drawImpostors(pGImp, sprites, M, opt, true);
 
       // the count pass: the same draw again, adding 1 per fragment. Red: fragments written. Green: fragments the quads cover.
       if (opt.measure || opt.heat) {
         gl.bindFramebuffer(gl.FRAMEBUFFER, fboCount); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
         gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
         gl.useProgram(pc.p); gl.uniform1f(pc.u.u_unit, UNIT); gl.uniform1i(pc.u.u_all, 0); drawSlices(pc, n, M, opt, tested);
+        if (sprites) { gl.useProgram(pCountImp.p); gl.uniform1f(pCountImp.u.u_unit, UNIT); gl.uniform1i(pCountImp.u.u_all, 0); drawImpostors(pCountImp, sprites, M, opt, true); }
         gl.useProgram(pc.p); gl.uniform1i(pc.u.u_all, 1); drawSlices(pc, n, M, opt, false);
+        if (sprites) { gl.useProgram(pCountImp.p); gl.uniform1i(pCountImp.u.u_all, 1); drawImpostors(pCountImp, sprites, M, opt, false); }
         gl.disable(gl.BLEND);
         if (opt.measure) {                                     // read the counts back: average and largest, per screen pixel
           const px = iw * ih, d = floatOK ? new Float32Array(px * 4) : new Uint8Array(px * 4); let sr = 0, sg = 0, mr = 0, mg = 0, any = 0;

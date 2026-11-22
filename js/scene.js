@@ -26,7 +26,7 @@
       'wil1', '#86aa59', 'wil2', '#9cbc69', 'wil3', '#6f954a', 'yew1', '#2f5b35', 'yew2', '#3b6c3e', 'ivy1', '#447a3a', 'ivy2', '#36662f', 'trunk', '#6d5138', 'trunk2', '#59412e', 'splinter', '#c9a878', 'moss', '#8e9b58']);
     // buildings
     add(['lime1', '#dad0b5', 'lime2', '#cdc1a2', 'lime3', '#e5dcc4', 'lime4', '#bdb192', 'limeD', '#a89d82', 'quoin', '#eee7d3', 'inside', '#3a332c', 'barnIn', '#3f352b',
-      'plaster', '#eee4c8', 'plaster2', '#e0d4b4', 'timber', '#7b5b3d', 'timberD', '#57402e', 'plank', '#94714b', 'plank2', '#82623f',
+      'floorB', '#a38257', 'floorB2', '#8e6f48', 'rug', '#8c3b33', 'rug2', '#b9a26a', 'plaster', '#eee4c8', 'plaster2', '#e0d4b4', 'timber', '#7b5b3d', 'timberD', '#57402e', 'plank', '#94714b', 'plank2', '#82623f',
       'tile1', '#c2613c', 'tile2', '#b25430', 'tile3', '#d1754a', 'tile4', '#a34a2d', 'tileMoss', '#9c8148', 'ridge', '#8c3f29', 'thatch1', '#b99b57', 'thatch2', '#a48646', 'thatch3', '#ccb16b',
       'slate', '#5f5751', 'slate2', '#6e655d', 'lead', '#8d867b', 'louvre', '#39332e', 'chimPot', '#b5583a', 'gold', '#dbb23e',
       'door', '#6b4a30', 'doorG', '#5e765a', 'doorR', '#8a3d31', 'doorB', '#7a5a3c', 'shutter', '#64846c', 'shutterR', '#93463a', 'shutterB', '#a98f5a', 'frame', '#efe8d4',
@@ -118,8 +118,11 @@
   function cell(x, y) { return Math.max(0, Math.min(H - 1, floor(y))) * W + Math.max(0, Math.min(W - 1, floor(x))); }
   function heightAt(x, y) { return survey().hgt[cell(x, y)]; }
   function kindAt(x, y) { return x < 0 || y < 0 || x >= W || y >= H ? -1 : survey().kind[cell(x, y)]; }
-  // the height to stand on: the ground, or the bridge's deck
+  // rooms with a floor to stand on: [x0, y0, x1, y1] (the farmhouse, the nave of the church)
+  const ROOMS = [[232, 56, 312, 88], [370, 244, 430, 268]];
+  // the height to stand on: the ground, the bridge's deck, or a floor
   function groundAt(x, y) {
+    for (let i = 0; i < ROOMS.length; i++) if (x > ROOMS[i][0] && x < ROOMS[i][2] && y > ROOMS[i][1] && y < ROOMS[i][3]) return G + 1;
     const c = cos(BRIDGE.rot), s = sin(BRIDGE.rot), lx = (x - BRIDGE.x) * c + (y - BRIDGE.y) * s, ly = -(x - BRIDGE.x) * s + (y - BRIDGE.y) * c;
     if (abs(lx) < 25 && abs(ly) < 9.5) return Models.deck(lx);
     return x < 0 || y < 0 || x >= W || y >= H ? G : Math.max(G, heightAt(x, y));
@@ -230,10 +233,14 @@
     { pts: side([300, 262, 230], 8.5).concat([[221, roadY(221)]], side([230, 262, 300], -8.5), [[308, roadY(308)]]), men: 4, gap: 11 },
     { pts: [[322, 212], [327, 240], [331, 262], [324, 266], [318, 236]], men: 1 },
     { pts: [[262, 100], [298, 100], [298, 140], [280, 144], [264, 134]], men: 1 },
-    { pts: side([50, 112], 10.5).concat(side([112, 50], 8)), men: 2, gap: 62 }
+    { pts: side([50, 112], 10.5).concat(side([112, 50], 8)), men: 2, gap: 62 },
+    { pts: [[262, 65], [279, 65], [279, 80], [262, 80]], men: 1 },                    // a man in the farmhouse
+    { pts: [[380, 255.2], [416, 255.2], [416, 256.8], [380, 256.8]], men: 1 }          // and one in the church
   ];
   // the jeep's run: along the road from beyond one edge of the map to beyond the other (the haze hides both ends)
   const JEEP = { from: -110, to: W + 110, speed: 52 };
+  // Slice effects (main.js): what is built, what is blown apart, whose walls come down. [stack, which one, ...]
+  const EFFECTS = { build: [['cottageB', 0, 0], ['sandbags', 0, 0], ['sandwall', 0, 0.35], ['sandbags', 1, 0.2], ['tent', 0, 0.5], ['tent', 1, 0.8], ['crates', 0, 0.9]], dismantle: [['barn', 0, 24]], lower: [['farmhouse', 0, 10], ['church', 0, 11]] };
   // lamps that light at dusk: [x, y, z, reach]
   const LAMPS = [[179, 186, G + 6, 46], [216, 258, G + 6, 46], [342, 163, G + 6, 46], [271, 91, G + 16, 54], [346.5, 256, G + 19, 56], [391, 166.5, G + 16, 46]];
   // birds wheel round the steeple: [centre x, y, radius, height, how many]
@@ -256,5 +263,5 @@
   }
 
   global.Scene = { WORLD: WORLD, KIND: KIND, palette: palette, stacks: stacks, layout: layout, light: light, survey: survey, groundAt: groundAt, heightAt: heightAt, kindAt: kindAt, roadY: roadY,
-    BRIDGE: BRIDGE, CROSS: CROSS, TANK: TANK, WRECK: WRECK, PATROLS: PATROLS, JEEP: JEEP, LAMPS: LAMPS, BIRDS: BIRDS };
+    EFFECTS: EFFECTS, BRIDGE: BRIDGE, CROSS: CROSS, TANK: TANK, WRECK: WRECK, PATROLS: PATROLS, JEEP: JEEP, LAMPS: LAMPS, BIRDS: BIRDS };
 })(typeof window !== 'undefined' ? window : globalThis);

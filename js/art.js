@@ -115,14 +115,27 @@
   // Slices are put in the atlas tallest first within a stack only by chance; the packing is plain rows.
   function buildStack(def, pal, atlas, shell) {
     const v = voxelise(def, pal, shell), pad = def.pad || 0;
-    const st = { name: def.name, def: def, shell: shell, w: def.w, h: def.h, n: def.layers, pad: pad, slices: [], radius: Math.hypot(def.w, def.h) / 2, vox: v.vox, flat: def.layers === 1 };
+    const st = { name: def.name, def: def, shell: shell, w: def.w, h: def.h, n: def.layers, pad: pad, slices: [], runs: [], radius: Math.hypot(def.w, def.h) / 2, vox: v.vox, flat: def.layers === 1 };
+    // two layers are the same when they are cropped alike and every pixel (material and normal) matches
+    const same = function (A, B) {
+      if (A.x0 !== B.x0 || A.y0 !== B.y0 || A.w !== B.w || A.h !== B.h) return false;
+      for (let y = A.y0; y < A.y0 + A.h; y++) for (let i = (y * def.w + A.x0) * 4, e = i + A.w * 4; i < e; i++) if (A.px[i] !== B.px[i]) return false;
+      return true;
+    };
+    let prev = null;
     for (let z = 0; z < def.layers; z++) {
-      const L = v.layers[z]; if (!L) continue;
+      const L = v.layers[z]; if (!L) { prev = null; continue; }
       const at = atlas.put(L.px, def.w, L.x0, L.y0, L.w, L.h);
       // u, v, w, h in the atlas; ox, oy: the centre of the cropped slice, measured from the axis.
       // sides: false when no pixel of the layer lies on its outline. That only happens in a ground tile (the
       // neighbouring tiles continue it): such a layer has a top but no side, and the engine draws it once.
-      st.slices.push({ z: z, u: at[0], v: at[1], w: L.w, h: L.h, ox: L.x0 + L.w / 2 - def.w / 2, oy: L.y0 + L.h / 2 - def.h / 2, sides: L.sides });
+      const sl = { z: z, n: 1, u: at[0], v: at[1], w: L.w, h: L.h, ox: L.x0 + L.w / 2 - def.w / 2, oy: L.y0 + L.h / 2 - def.h / 2, sides: L.sides };
+      st.slices.push(sl);
+      // Runs: layers that repeat the one under them (courses of a wall, a trunk, a pole) are one slab, up to
+      // three layers tall. The engine's slab drawing uses this list instead of the slices.
+      const run = st.runs[st.runs.length - 1];
+      if (prev && run.n < 3 && L.sides && same(L, prev)) run.n++; else st.runs.push({ z: z, n: 1, u: sl.u, v: sl.v, w: sl.w, h: sl.h, ox: sl.ox, oy: sl.oy, sides: sl.sides });
+      prev = L;
     }
     return st;
   }
