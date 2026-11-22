@@ -6,6 +6,8 @@ A small sprite-stacking renderer in plain WebGL2, with no libraries. Everything 
 slices, drawn as textured quads. The camera turns, tilts and zooms freely, in a parallel or a perspective
 view, and the cost stays near one fragment written per pixel.
 
+This engine was written with AI (Claude) as a free, public-domain reference for anyone to learn from or use.
+
 It exists to test two claims about sprite stacking with numbers instead of opinions:
 
 - *"Slices break apart with a free camera."* They do if you draw one quad per slice. They do not if every
@@ -78,6 +80,34 @@ What the numbers say, and what they do not:
 - On this GPU every row is far under a 60 Hz frame (16.7 ms), so these timings mostly show that the scene is
   small for the hardware. The fragment counts are the hardware-independent part. Run `tools/bench.py` on your
   own machine; `--software` uses a CPU rasteriser, where fill cost is not hidden.
+
+### Without a GPU
+
+The same benchmark on a CPU rasteriser (SwiftShader, `tools/bench.py --software`), where fill is not hidden by
+fast hardware. The fragment counts came out the same as on the GPU, as they should. The timings are rough: only
+6 frames per row, on a machine that was busy with other work at the time.
+
+| view | resolution | order | written avg | ms/frame |
+| --- | --- | --- | ---: | ---: |
+| overview | native 1920x1080 | painter, whole stacks | 15.42 | 199 |
+| overview | native 1920x1080 | hidden-surface, whole stacks | 0.44 | 187 |
+| overview | internal 960x540 | painter, whole stacks | 8.00 | 59 |
+| overview | internal 960x540 | hidden-surface, whole stacks | 0.44 | 67 |
+| street | native 1920x1080 | painter, whole stacks | 222.07 | 2634 |
+| street | native 1920x1080 | painter, shell stacks | 81.34 | 2469 |
+| street | native 1920x1080 | hidden-surface, whole stacks | 1.07 | 670 |
+| street | native 1920x1080 | hidden-surface, shell stacks | 1.07 | 1925 |
+| street | internal 960x540 | painter, whole stacks | 113.35 | 390 |
+| street | internal 960x540 | hidden-surface, whole stacks | 0.89 | 184 |
+
+- At street level, hidden-surface removal and half resolution together take the frame from about 2.6 s to
+  about 0.18 s. None of these rows is real time: a software rasteriser at 1080p is the wrong tool whatever the
+  method.
+- The two hidden-surface rows at native resolution write exactly the same fragments yet differ by nearly three
+  times (670 and 1925 ms). That is the noise in this run, so read these timings as orders of magnitude only.
+- Shell stacks barely help here (2634 to 2469 ms): the rasteriser still walks every covered fragment, and
+  covered fragments are what a CPU pays for.
+- In the overview the ordering makes almost no difference; the cost there is mostly the per-pixel light pass.
 
 The two heat maps below are the street view at 1920x1080. (The frame times printed in these stills include the
 count pass and its read-back, so they are not the timings in the table.)
@@ -189,4 +219,4 @@ frame over `n` frames.
 
 ## Licence
 
-MIT. See `LICENSE`.
+Public domain (the Unlicense). See `LICENSE`. Copy it, change it, ship it; no credit is needed.
