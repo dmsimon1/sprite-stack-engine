@@ -20,7 +20,7 @@ VIEWS = ['overview', 'street']
 RES = [(1, 'native 1920x1080'), (2, 'internal 960x540')]
 ORDERS = [(0, 0, 'painter, whole stacks'), (0, 1, 'painter, shell stacks'), (1, 0, 'hidden-surface, whole stacks'), (1, 1, 'hidden-surface, shell stacks')]
 # the faster ways: (voxel mode, impostors, skip thin layers, name), and where: (view, internal resolution divisor, name)
-TRICKS = [(0, 0, 0, 'flat quads (none)'), (1, 0, 0, 'voxel mode (slabs)'), (0, 1, 0, 'impostors'), (0, 0, 1, 'skip thin layers'), (1, 1, 0, 'voxel mode + impostors'), (1, 1, 1, 'all three')]
+TRICKS = [(0, 0, 0, 'flat quads (none)'), (1, 0, 0, 'voxel mode (each slice a box with sides)'), (0, 1, 0, 'impostors'), (0, 0, 1, 'skip thin layers'), (1, 1, 0, 'voxel mode + impostors'), (1, 1, 1, 'all three')]
 PLACES = [('overview', 1, 'overview, 1920x1080'), ('street', 1, 'street, 1920x1080'), ('far', 3, 'far (whole map small), internal 640x360')]
 
 

@@ -1,7 +1,7 @@
 // main.js: the demo. Builds the village, moves what moves, flies the camera, shows the numbers.
 //
 // Mouse: drag turns and tilts, shift-drag or right-drag pans, wheel zooms.
-// Keys: V or 1 voxel mode (by itself, on, off), 2 impostors, 3 skip thin layers; Z build, X dismantle, C lower walls; P perspective / parallel, H hidden-surface removal, O overdraw heat map (written, covered, off), M measure,
+// Keys: V (or 1) voxel mode (by itself, on, off), 2 impostors, 3 skip thin layers; Z build, X dismantle, C lower walls; P perspective / parallel, H hidden-surface removal, O overdraw heat map (written, covered, off), M measure,
 //       R internal resolution (1x, 1/2, 1/3), L shell stacks, T thickness fill, G edge guard,
 //       S shadows, A ambient occlusion, B bloom, N time of day (drifting, afternoon, golden hour, dusk),
 //       Space stops and starts the slow turn, U hides the read-out.
@@ -299,7 +299,7 @@
       (voxel ? 'VOXEL MODE: a box per slice, depth test' : S.hsr ? 'hidden-surface removal: top first, depth test' : 'painter order: bottom first, no depth test') + '   ' + (S.shell ? 'shell' : 'whole') + ' stacks' + (voxel ? '' : (S.fill ? '' : '   fill off') + (S.guard ? '' : '   guard off')),
       'voxel mode ' + (voxel ? 'on' : 'off') + (S.voxel === 1 ? ' (forced on)' : S.voxel === 0 ? ' (forced off)' : voxel ? (rowsSeen > VOXEL_ROWS ? ' (a layer is ' + Math.round(rowsSeen) + ' rows tall, over ' + VOXEL_ROWS + ')' : ' (the view is under ' + Math.round(tiltLimit() * 180 / Math.PI) + '\u00b0)') : ' (flat slices hold above ' + Math.round(tiltLimit() * 180 / Math.PI) + '\u00b0)') + '   V changes it',
       th(s.slices) + ' slices, ' + th(s.instances) + (voxel ? ' boxes' : ' quads') + (sprites.length ? ' (' + sprites.length + ' of them impostors)' : ''),
-      'faster ways:  1 voxel mode (slabs: each slice a box with sides) ' + (voxel ? 'on' : 'off') + '   2 impostors ' + (!S.impostors ? 'off' : sprites.length ? 'on, ' + Math.round(sheet.bytes / 1048576) + ' MB' : cam.mode === 'persp' ? 'on (parallel camera only)' : !(S.hsr || voxel) ? 'on (need the depth test)' : 'on (baking)') + '   3 skip thin layers ' + (S.lod ? 'on' : 'off'),
+      'faster ways:  V voxel mode (each slice a box with sides) ' + (voxel ? 'on' : 'off') + '   2 impostors ' + (!S.impostors ? 'off' : sprites.length ? 'on, ' + Math.round(sheet.bytes / 1048576) + ' MB' : cam.mode === 'persp' ? 'on (parallel camera only)' : !(S.hsr || voxel) ? 'on (need the depth test)' : 'on (baking)') + '   3 skip thin layers ' + (S.lod ? 'on' : 'off'),
       s.written ? 'fragments per pixel: ' + f1(s.written.avg) + ' written (' + Math.round(s.written.max) + ' max), ' + f1(s.covered.avg) + ' covered (' + Math.round(s.covered.max) + ' max)' : 'fragments per pixel: press M to measure',
       'slice effects:  Z build   X dismantle   C lower walls near the view ' + (FX.on ? 'on' : 'off'),
       'frame ' + f1(ms) + ' ms' + (s.gpuMs !== null ? '   gpu ' + f1(s.gpuMs) + ' ms' : '') + '   build ' + f1(s.cpuMs) + ' ms' + (S.measure || S.heat ? '   (with the count pass)' : '')
